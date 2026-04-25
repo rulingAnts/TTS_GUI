@@ -1,0 +1,190 @@
+name: Build Installers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+
+  # ═══════════════════════════════════════════════════════════════════════
+  build-mac:
+    name: macOS .dmg (arm64)
+    runs-on: macos-latest   # macos-14 = Apple Silicon (arm64)
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          brew install espeak-ng create-dmg
+          echo "espeak-ng: $(espeak-ng --version 2>&1 | head -1)"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller>=6.0
+
+      - name: Cache PyInstaller build artifacts
+        uses: actions/cache@v4
+        with:
+          path: build/
+          key: pyinstaller-mac-${{ hashFiles('kokoro_studio.spec', 'requirements.txt') }}
+          restore-keys: pyinstaller-mac-
+
+      - name: Build .app with PyInstaller
+        run: pyinstaller kokoro_studio.spec --clean --noconfirm
+
+      - name: Create placeholder icons if missing
+        run: |
+          mkdir -p assets
+          # Generate minimal valid .icns if not present
+          if [ ! -f assets/icon.icns ]; then
+            python3 - <<'PYEOF'
+          # Create a tiny valid PNG then convert to icns via sips
+          import subprocess, os, struct, zlib
+          # 16x16 solid teal PNG
+          def make_png(size=16):
+              import struct, zlib
+              def chunk(name, data):
+                  c = struct.pack('>I', len(data)) + name + data
+                  return c + struct.pack('>I', zlib.crc32(c[4:]) & 0xffffffff)
+              raw = b'\x00' + b'\x00\xb4\xd8\xff' * size  # teal pixels
+              idat = zlib.compress(raw * size)
+              return (b'\x89PNG\r\n\x1a\n'
+                      + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0))
+                      + chunk(b'IDAT', idat)
+                      + chunk(b'IEND', b''))
+          with open('/tmp/icon.png', 'wb') as f:
+              f.write(make_png(512))
+          iconset = '/tmp/icon.iconset'
+          os.makedirs(iconset, exist_ok=True)
+          for sz in [16,32,64,128,256,512]:
+              subprocess.run(['sips', '-z', str(sz), str(sz),
+                              '/tmp/icon.png', '--out', f'{iconset}/icon_{sz}x{sz}.png'],
+                             capture_output=True)
+          subprocess.run(['iconutil', '-c', 'icns', iconset, '-o', 'assets/icon.icns'])
+          print('Created placeholder icon.icns')
+          PYEOF
+          fi
+
+      - name: Package as DMG
+        run: |
+          APP="dist/Kokoro TTS Studio.app"
+          DMG="dist/KokoroTTSStudio-mac.dmg"
+          rm -f "$DMG"
+          create-dmg \
+            --volname "Kokoro TTS Studio" \
+            --window-pos 200 140 \
+            --window-size 560 320 \
+            --icon-size 128 \
+            --icon "Kokoro TTS Studio.app" 140 150 \
+            --hide-extension "Kokoro TTS Studio.app" \
+            --app-drop-link 420 150 \
+            "$DMG" \
+            "$APP"
+
+      - name: Show output size
+        run: |
+          du -sh "dist/KokoroTTSStudio-mac.dmg"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KokoroTTSStudio-mac
+          path: dist/KokoroTTSStudio-mac.dmg
+          retention-days: 30
+
+  # ═══════════════════════════════════════════════════════════════════════
+  build-windows:
+    name: Windows .exe installer (x64)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+
+      - name: Install espeak-ng and Inno Setup via Chocolatey
+        shell: pwsh
+        run: |
+          choco install espeak innosetup -y --no-progress
+          refreshenv
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller>=6.0
+
+      - name: Cache PyInstaller build artifacts
+        uses: actions/cache@v4
+        with:
+          path: build/
+          key: pyinstaller-win-${{ hashFiles('kokoro_studio.spec', 'requirements.txt') }}
+          restore-keys: pyinstaller-win-
+
+      - name: Create placeholder icon if missing
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path assets | Out-Null
+          if (-not (Test-Path "assets\icon.ico")) {
+            python - @'
+          # Minimal 16x16 ICO file (teal square)
+          import struct
+          bmp = bytes([0]*40)  # BITMAPINFOHEADER placeholder
+          # Write a minimal valid 1x1 ICO
+          ico = (b'\x00\x00\x01\x00\x01\x00'  # header
+                 b'\x10\x10\x00\x00\x01\x00\x18\x00'  # image entry
+                 + struct.pack('<I', 40 + 768 + 64) + struct.pack('<I', 22))
+          with open('assets/icon.ico', 'wb') as f:
+              f.write(b'\x00\x00\x01\x00\x01\x00\x10\x10'
+                      b'\x00\x00\x01\x00\x20\x00\x28\x04'
+                      b'\x00\x00\x16\x00\x00\x00')
+              # BITMAPINFOHEADER
+              f.write(struct.pack('<IiiHHIIiiII',
+                  40, 16, 32, 1, 32, 0, 0, 0, 0, 0, 0))
+              # Pixel data (teal BGRA)
+              f.write(b'\xd8\xb4\x00\xff' * 256)  # 16x16
+              # XOR + AND masks
+              f.write(b'\x00' * 64)
+          print('Created placeholder icon.ico')
+          '@
+          }
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: pyinstaller kokoro_studio.spec --clean --noconfirm
+
+      - name: Compile Inno Setup installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc installer_windows.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+      - name: Show output size
+        shell: pwsh
+        run: Get-Item dist\KokoroTTSStudio-Setup.exe | Select-Object Name, Length
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KokoroTTSStudio-windows
+          path: dist\KokoroTTSStudio-Setup.exe
+          retention-days: 30

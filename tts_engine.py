@@ -8,7 +8,14 @@ from typing import Callable, List, Optional, Union
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 24000
-_HERE = Path(__file__).parent
+
+def _get_base() -> Path:
+    """Use app_paths if available (works in both dev and PyInstaller)."""
+    try:
+        from app_paths import get_base_path, get_models_path
+        return get_base_path()
+    except ImportError:
+        return Path(__file__).parent
 
 # Pause durations inserted for (...) markers (in milliseconds)
 SHORT_PAUSE_MS = 500   # inline (...)  within a sentence
@@ -91,10 +98,19 @@ def _find_voice_tensor_path(voice_id: str) -> Optional[Path]:
         import kokoro
 
         kokoro_dir = Path(kokoro.__file__).parent
+        base = _get_base()
+        # Also check user app-data models dir (populated by first-run download)
+        try:
+            from app_paths import get_models_path
+            user_models = get_models_path() / "Kokoro-82M" / "voices"
+        except ImportError:
+            user_models = None
+
         search_dirs = [
+            *([] if user_models is None else [user_models]),
             # Local offline bundle (populated by setup_offline.py)
-            _HERE / "models" / "Kokoro-82M" / "voices",
-            _HERE / "models" / "voices",
+            base / "models" / "Kokoro-82M" / "voices",
+            base / "models" / "voices",
             # Pip package install directory
             kokoro_dir / "voices",
             kokoro_dir / "voice",

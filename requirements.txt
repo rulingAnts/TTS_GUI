@@ -5,7 +5,12 @@ pywebview>=5.0
 librosa
 sounddevice
 pydub          # optional: required for MP3 export
+requests
+huggingface_hub
+pyinstaller>=6.0
+
 # espeak-ng must be installed as a system package (not via pip):
-#   macOS:  brew install espeak-ng
-#   Linux:  sudo apt-get install espeak-ng
+#   macOS:   brew install espeak-ng
+#   Linux:   sudo apt-get install espeak-ng
 #   Windows: https://github.com/espeak-ng/espeak-ng/releases
+#   (When bundled with PyInstaller, espeakng_loader handles this automatically)

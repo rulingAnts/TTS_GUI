@@ -116,6 +116,51 @@ present in the Kokoro installation.
 
 ---
 
+## Building from Source
+
+Produces a self-contained installer — no Python or espeak-ng required by end users.
+Model weights (~330 MB) are downloaded on first launch.
+
+### macOS (.dmg — arm64)
+
+```bash
+brew install espeak-ng create-dmg
+pip install -r requirements.txt
+bash build_mac.sh
+# Output: dist/KokoroTTSStudio-mac.dmg
+```
+
+> **Icons:** Drop `assets/icon.icns` (1024×1024) before building for a
+> polished result.  The build script generates a teal placeholder if absent.
+
+### Windows (.exe installer — x64)
+
+```bat
+choco install espeak innosetup
+pip install -r requirements.txt
+build_windows.bat
+:: Output: dist\KokoroTTSStudio-Setup.exe
+```
+
+> **Icons:** Drop `assets/icon.ico` (256×256) before building.
+
+### GitHub Actions (automated)
+
+Push to `main` or trigger **Build Installers** manually from the Actions tab.
+Both `.dmg` and `.exe` are uploaded as 30-day artifacts on each run.
+
+### PyInstaller notes
+
+- Torch is large (~2 GB unpacked in the bundle) — first build takes time.
+- `numba` is excluded; librosa works without it for the operations used here.
+- The `espeakng_loader` pip package bundles pre-built espeak-ng binaries,
+  so end users don't need to install it separately.
+- Model weights are **not** bundled — they download to
+  `~/Library/Application Support/KokoroTTSStudio/models/` (macOS) or
+  `%APPDATA%\KokoroTTSStudio\models\` (Windows) on first launch.
+
+---
+
 ## Attributions
 
 See [LICENSE](LICENSE).

@@ -105,7 +105,19 @@ def get_all_voice_ids() -> Set[str]:
     return ids
 
 
-_HERE = Path(__file__).parent
+def _get_search_dirs() -> list:
+    dirs = []
+    try:
+        from app_paths import get_base_path, get_models_path
+        base = get_base_path()
+        dirs += [get_models_path() / "Kokoro-82M" / "voices",
+                 base / "models" / "Kokoro-82M" / "voices",
+                 base / "models" / "voices"]
+    except ImportError:
+        here = Path(__file__).parent
+        dirs += [here / "models" / "Kokoro-82M" / "voices",
+                 here / "models" / "voices"]
+    return dirs
 
 
 def discover_installed_voices() -> Set[str]:
@@ -114,16 +126,14 @@ def discover_installed_voices() -> Set[str]:
         import kokoro
 
         kokoro_dir = Path(kokoro.__file__).parent
-        search_dirs = [
-            # Local offline bundle (populated by setup_offline.py)
-            _HERE / "models" / "Kokoro-82M" / "voices",
-            _HERE / "models" / "voices",
-            # Pip package install directory
-            kokoro_dir / "voices",
-            kokoro_dir / "voice",
-            kokoro_dir,
-            Path.home() / ".cache" / "kokoro" / "voices",
-        ]
+        search_dirs = (
+            _get_search_dirs() + [
+                kokoro_dir / "voices",
+                kokoro_dir / "voice",
+                kokoro_dir,
+                Path.home() / ".cache" / "kokoro" / "voices",
+            ]
+        )
         for d in search_dirs:
             if d.is_dir():
                 for pt in d.glob("*.pt"):

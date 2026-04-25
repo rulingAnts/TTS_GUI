@@ -1,26 +1,42 @@
 """
 Kokoro TTS Studio — pywebview desktop app entry point.
+
+Import order is intentional:
+  1. app_paths (no heavy deps)
+  2. app_paths.setup_espeak_env()  ← must run before kokoro/torch import
+  3. everything else
 """
 
+# ── Step 1: path + espeak env setup (before any TTS imports) ──────────────
+import app_paths
+app_paths.setup_espeak_env()
+
+# ── Step 2: stdlib + lightweight imports ──────────────────────────────────
 import json
 import logging
 import os
 import platform
 import subprocess
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
 import webview
 
+# ── Step 3: app modules (may import torch/kokoro internally) ──────────────
 from tts_engine import TTSEngine
 from voice_data import VOICE_DATA, validate_voice_data
+from app_paths import (
+    get_frontend_path,
+    get_setup_frontend_path,
+    get_outputs_path,
+    get_models_path,
+    model_is_ready,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
-
-_HERE = Path(__file__).parent
-DEFAULT_OUTPUT_DIR = str(_HERE / "outputs")
 
 
 def _check_espeak() -> bool:
@@ -34,25 +50,21 @@ def _check_espeak() -> bool:
 
 
 def _espeak_install_hint() -> str:
-    sys = platform.system()
-    if sys == "Darwin":
-        return "brew install espeak-ng"
-    if sys == "Windows":
-        return "https://github.com/espeak-ng/espeak-ng/releases"
+    s = platform.system()
+    if s == "Darwin":  return "brew install espeak-ng"
+    if s == "Windows": return "https://github.com/espeak-ng/espeak-ng/releases"
     return "sudo apt-get install espeak-ng"
 
 
-# ---------------------------------------------------------------------------
-# pywebview API class
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# Main TTS API (exposed to the main window's JS)
+# ─────────────────────────────────────────────────────────────────────────────
 
 class Api:
     def __init__(self):
-        self.window = None  # Injected after webview.create_window()
+        self.window = None
         self._engine = TTSEngine()
         self._voice_data, self._unavailable = validate_voice_data()
-
-        # Generation state
         self._running = False
         self._progress = 0.0
         self._current_chunk = 0
@@ -61,40 +73,24 @@ class Api:
         self._last_result: dict | None = None
         self._last_output_path: str | None = None
 
-        Path(DEFAULT_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
-
-    # ------------------------------------------------------------------
-    # Voice data
-    # ------------------------------------------------------------------
-
     def get_voice_data(self) -> dict:
         try:
-            return {
-                "voices": self._voice_data,
-                "unavailable": self._unavailable,
-            }
+            return {"voices": self._voice_data, "unavailable": self._unavailable}
         except Exception as exc:
             logger.error("get_voice_data: %s", exc)
             return {"voices": VOICE_DATA, "unavailable": [], "error": str(exc)}
-
-    # ------------------------------------------------------------------
-    # Generation
-    # ------------------------------------------------------------------
 
     def generate(self, params: dict) -> dict:
         try:
             if self._running:
                 return {"started": False, "error": "Generation already in progress"}
-
             self._cancel_flag.clear()
             self._running = True
             self._progress = 0.0
             self._current_chunk = 0
             self._total_chunks = 0
             self._last_result = None
-
-            t = threading.Thread(target=self._generate_thread, args=(params,), daemon=True)
-            t.start()
+            threading.Thread(target=self._generate_thread, args=(params,), daemon=True).start()
             return {"started": True}
         except Exception as exc:
             logger.error("generate: %s", exc)
@@ -108,25 +104,25 @@ class Api:
                 self._last_result = {"success": False, "error": "No text provided"}
                 return
 
-            voice_specs = params.get("voices", [{"voice_id": "af_heart", "weight": 100}])
-            lang_code = params.get("lang_code", "a")
-            speed = float(params.get("speed", 1.0))
-            split_pattern = params.get("split_pattern", r"\n\n+")
-            output_format = params.get("output_format", "wav").lower()
-            post_proc = params.get("post_processing", {"normalize": True})
+            voice_specs  = params.get("voices", [{"voice_id": "af_heart", "weight": 100}])
+            lang_code    = params.get("lang_code", "a")
+            speed        = float(params.get("speed", 1.0))
+            split_pat    = params.get("split_pattern", r"\n\n+")
+            out_fmt      = params.get("output_format", "wav").lower()
+            post_proc    = params.get("post_processing", {"normalize": True})
 
-            out_dir = params.get("output_dir") or DEFAULT_OUTPUT_DIR
+            out_dir  = params.get("output_dir") or str(get_outputs_path())
             out_name = (params.get("output_filename") or "").strip()
             if not out_name:
                 out_name = f"output_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-            ext = output_format if output_format in ("wav", "flac", "mp3") else "wav"
+            ext = out_fmt if out_fmt in ("wav", "flac", "mp3") else "wav"
             output_path = str(Path(out_dir) / f"{out_name}.{ext}")
             Path(out_dir).mkdir(parents=True, exist_ok=True)
 
             def progress_cb(current: int, total: int) -> None:
                 self._current_chunk = current
-                self._total_chunks = total
+                self._total_chunks  = total
                 self._progress = current / total if total > 0 else 0.0
 
             result_path = self._engine.generate_audio(
@@ -134,21 +130,19 @@ class Api:
                 voice_specs=voice_specs,
                 lang_code=lang_code,
                 speed=speed,
-                split_pattern=split_pattern,
+                split_pattern=split_pat,
                 post_proc_options=post_proc,
                 output_path=output_path,
-                output_format=output_format,
+                output_format=out_fmt,
                 progress_callback=progress_cb,
                 cancel_flag=self._cancel_flag,
             )
 
             self._last_output_path = result_path
-
             duration = 0.0
             try:
                 import soundfile as sf
-                info = sf.info(result_path)
-                duration = info.duration
+                duration = sf.info(result_path).duration
             except Exception:
                 pass
 
@@ -158,7 +152,6 @@ class Api:
                 "duration_seconds": duration,
                 "error": None,
             }
-
         except Exception as exc:
             logger.error("_generate_thread: %s", exc, exc_info=True)
             self._last_result = {"success": False, "error": str(exc)}
@@ -166,30 +159,19 @@ class Api:
             self._running = False
             self._progress = 1.0
 
-    # ------------------------------------------------------------------
-    # Preview
-    # ------------------------------------------------------------------
-
     def preview(self, params: dict) -> dict:
         try:
-            # "Play Last" passes play_file — stream the saved file directly
             play_file = params.get("play_file", "")
             if play_file:
                 return self._play_file(play_file)
-
             text = params.get("text", "")[:200].strip()
             if not text:
                 return {"success": False, "error": "No text for preview"}
-
-            voice_specs = params.get("voices", [{"voice_id": "af_heart", "weight": 100}])
-            lang_code = params.get("lang_code", "a")
-            speed = float(params.get("speed", 1.0))
-
             self._engine.preview_audio(
                 text=text,
-                voice_specs=voice_specs,
-                lang_code=lang_code,
-                speed=speed,
+                voice_specs=params.get("voices", [{"voice_id": "af_heart", "weight": 100}]),
+                lang_code=params.get("lang_code", "a"),
+                speed=float(params.get("speed", 1.0)),
             )
             return {"success": True, "error": None}
         except Exception as exc:
@@ -208,10 +190,6 @@ class Api:
             logger.error("_play_file: %s", exc)
             return {"success": False, "error": str(exc)}
 
-    # ------------------------------------------------------------------
-    # Control & status
-    # ------------------------------------------------------------------
-
     def cancel(self) -> None:
         self._cancel_flag.set()
 
@@ -224,10 +202,6 @@ class Api:
             "result": self._last_result,
             "last_output_path": self._last_output_path,
         }
-
-    # ------------------------------------------------------------------
-    # File system
-    # ------------------------------------------------------------------
 
     def browse_file(self) -> str:
         try:
@@ -251,14 +225,11 @@ class Api:
 
     def open_folder(self, path: str) -> None:
         try:
-            target = path or DEFAULT_OUTPUT_DIR
-            sys = platform.system()
-            if sys == "Darwin":
-                subprocess.Popen(["open", target])
-            elif sys == "Windows":
-                subprocess.Popen(["explorer", target])
-            else:
-                subprocess.Popen(["xdg-open", target])
+            target = path or str(get_outputs_path())
+            sys_name = platform.system()
+            if sys_name == "Darwin":   subprocess.Popen(["open", target])
+            elif sys_name == "Windows": subprocess.Popen(["explorer", target])
+            else:                       subprocess.Popen(["xdg-open", target])
         except Exception as exc:
             logger.error("open_folder: %s", exc)
 
@@ -271,19 +242,68 @@ class Api:
             return ""
 
     def get_default_output_dir(self) -> str:
-        return DEFAULT_OUTPUT_DIR
+        return str(get_outputs_path())
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# First-run model download (setup window)
+# ─────────────────────────────────────────────────────────────────────────────
 
-def main() -> None:
+class _DownloadApi:
+    """JS API exposed during the first-run setup window."""
+
+    def __init__(self):
+        self.window = None
+        self._cancel = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        """Called by on_setup_loaded; starts download in background thread."""
+        self._cancel.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def retry(self) -> None:
+        """Called from JS retry button."""
+        self._cancel.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            from model_downloader import download_model
+
+            dest = get_models_path() / "Kokoro-82M"
+            logger.info("Downloading Kokoro model to %s", dest)
+
+            def progress_cb(fraction: float, filename: str) -> None:
+                pct = round(fraction * 100)
+                short = Path(filename).name
+                js = f"updateProgress({pct}, {json.dumps(short)})"
+                try:
+                    self.window.evaluate_js(js)
+                except Exception:
+                    pass
+
+            download_model(dest, progress_cb, self._cancel)
+            self.window.evaluate_js("onDownloadComplete()")
+            time.sleep(1.5)
+            _open_main_window(self.window)
+
+        except Exception as exc:
+            logger.error("Download failed: %s", exc)
+            try:
+                self.window.evaluate_js(f"onDownloadError({json.dumps(str(exc))})")
+            except Exception:
+                pass
+
+
+def _open_main_window(setup_window=None) -> None:
+    """Create the main TTS window, then destroy the setup window (if any)."""
     api = Api()
+    html_path = str(get_frontend_path() / "index.html")
 
-    html_path = str(_HERE / "frontend" / "index.html")
-
-    window = webview.create_window(
+    main_win = webview.create_window(
         "Kokoro TTS Studio",
         html_path,
         js_api=api,
@@ -292,10 +312,9 @@ def main() -> None:
         min_size=(860, 600),
         background_color="#1a1a2e",
     )
+    api.window = main_win
 
-    api.window = window
-
-    def on_loaded() -> None:
+    def on_main_loaded():
         if not _check_espeak():
             hint = _espeak_install_hint()
             msg = (
@@ -303,9 +322,72 @@ def main() -> None:
                 f"Install it with:\n  {hint}\n\n"
                 "Text-to-speech will not work without it."
             )
-            window.evaluate_js(f"showStartupError({json.dumps(msg)})")
+            main_win.evaluate_js(f"showStartupError({json.dumps(msg)})")
 
-    webview.start(on_loaded, debug=os.environ.get("TTS_DEBUG") == "1")
+    main_win.events.loaded += on_main_loaded
+
+    if setup_window:
+        setup_window.destroy()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry point
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    import sys
+
+    if model_is_ready():
+        # ── Normal launch ──────────────────────────────────────────────────
+        api = Api()
+        html_path = str(get_frontend_path() / "index.html")
+
+        window = webview.create_window(
+            "Kokoro TTS Studio",
+            html_path,
+            js_api=api,
+            width=1280,
+            height=820,
+            min_size=(860, 600),
+            background_color="#1a1a2e",
+        )
+        api.window = window
+
+        def on_loaded():
+            if not _check_espeak():
+                hint = _espeak_install_hint()
+                msg = (
+                    "espeak-ng is not installed or not on PATH.\n\n"
+                    f"Install it with:\n  {hint}\n\n"
+                    "Text-to-speech will not work without it."
+                )
+                window.evaluate_js(f"showStartupError({json.dumps(msg)})")
+
+        webview.start(on_loaded, debug=os.environ.get("TTS_DEBUG") == "1")
+
+    else:
+        # ── First-run: show setup/download window ──────────────────────────
+        dl_api = _DownloadApi()
+        setup_html = str(get_setup_frontend_path() / "setup.html")
+
+        setup_win = webview.create_window(
+            "Kokoro TTS Studio — First Run Setup",
+            setup_html,
+            js_api=dl_api,
+            width=520,
+            height=340,
+            resizable=False,
+            background_color="#0d0d1a",
+        )
+        dl_api.window = setup_win
+
+        def on_setup_loaded():
+            dl_api.start()
+
+        webview.start(
+            on_setup_loaded,
+            debug=os.environ.get("TTS_DEBUG") == "1",
+        )
 
 
 if __name__ == "__main__":
