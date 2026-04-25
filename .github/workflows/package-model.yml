@@ -81,6 +81,7 @@ jobs:
       - name: Collect pip runtime cache
         if: ${{ !inputs.skip_pip_cache }}
         run: |
+          mkdir -p bundle/pip-cache
           for cache_dir in \
               "$HOME/.cache/kokoro-onnx" \
               "$HOME/.cache/huggingface/hub"; do
@@ -88,6 +89,8 @@ jobs:
               TARGET="bundle/pip-cache/$(basename $cache_dir)"
               cp -r "$cache_dir" "$TARGET"
               echo "Copied $cache_dir → $TARGET"
+            else
+              echo "Not found (skipping): $cache_dir"
             fi
           done
 
