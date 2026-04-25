@@ -105,6 +105,9 @@ def get_all_voice_ids() -> Set[str]:
     return ids
 
 
+_HERE = Path(__file__).parent
+
+
 def discover_installed_voices() -> Set[str]:
     available: Set[str] = set()
     try:
@@ -112,6 +115,10 @@ def discover_installed_voices() -> Set[str]:
 
         kokoro_dir = Path(kokoro.__file__).parent
         search_dirs = [
+            # Local offline bundle (populated by setup_offline.py)
+            _HERE / "models" / "Kokoro-82M" / "voices",
+            _HERE / "models" / "voices",
+            # Pip package install directory
             kokoro_dir / "voices",
             kokoro_dir / "voice",
             kokoro_dir,

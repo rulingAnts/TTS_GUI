@@ -8,6 +8,7 @@ from typing import Callable, List, Optional
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 24000
+_HERE = Path(__file__).parent
 
 
 # ---------------------------------------------------------------------------
@@ -21,6 +22,10 @@ def _find_voice_tensor_path(voice_id: str) -> Optional[Path]:
 
         kokoro_dir = Path(kokoro.__file__).parent
         search_dirs = [
+            # Local offline bundle (populated by setup_offline.py)
+            _HERE / "models" / "Kokoro-82M" / "voices",
+            _HERE / "models" / "voices",
+            # Pip package install directory
             kokoro_dir / "voices",
             kokoro_dir / "voice",
             kokoro_dir,

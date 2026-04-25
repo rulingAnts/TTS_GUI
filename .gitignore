@@ -10,6 +10,12 @@ venv/
 dist/
 build/
 
+# Local model weights (use setup_offline.py to populate)
+models/
+
+# Temporary extraction directory
+_extract_tmp/
+
 # Generated output
 outputs/
 
