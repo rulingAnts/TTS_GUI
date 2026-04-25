@@ -27,13 +27,18 @@ const VOICE_SLOTS = [
 // ─────────────────────────────────────────────────────────────────────────────
 // Init
 // ─────────────────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
+function appInit() {
   initControls();
   initVoiceBlending();
   initPostProcessing();
   loadVoiceData();
   loadDefaultOutputDir();
-});
+}
+
+// pywebview injects its API asynchronously — wait for it before calling anything
+window.addEventListener('pywebviewready', appInit);
+// Fallback in case the event already fired before this script ran
+if (window.pywebview && window.pywebview.api) appInit();
 
 // Called by Python backend after window loads if espeak-ng is missing
 window.showStartupError = function (msg) {
