@@ -3,12 +3,82 @@ import logging
 import threading
 import numpy as np
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 24000
 _HERE = Path(__file__).parent
+
+# Pause durations inserted for (...) markers (in milliseconds)
+SHORT_PAUSE_MS = 500   # inline (...)  within a sentence
+LONG_PAUSE_MS  = 1200  # standalone (...) on its own line
+
+
+# ---------------------------------------------------------------------------
+# Pause-marker parsing
+# ---------------------------------------------------------------------------
+
+_LONG_TOKEN  = "\x00LONG_PAUSE\x00"
+_SHORT_TOKEN = "\x00SHORT_PAUSE\x00"
+_TOKEN_RE    = re.compile(
+    f"({re.escape(_LONG_TOKEN)}|{re.escape(_SHORT_TOKEN)})"
+)
+
+
+def _parse_pause_segments(text: str) -> List[Union[str, int]]:
+    """
+    Split text into a sequence of alternating content and silence items:
+      str → text to synthesise
+      int → silence length in samples
+
+    Rules applied in order:
+      1. A line containing *only* (...) (plus optional whitespace) →
+         LONG_PAUSE_MS of silence (paragraph-level beat).
+      2. (...) appearing inline within other text →
+         SHORT_PAUSE_MS of silence.
+    """
+    # 1. Replace standalone-line (...) with a unique token
+    processed = re.sub(r"(?m)^[ \t]*\(\.{3}\)[ \t]*$", _LONG_TOKEN, text)
+    # 2. Replace any remaining inline (...) with a shorter-pause token
+    processed = processed.replace("(...)", _SHORT_TOKEN)
+
+    long_samples  = int(SAMPLE_RATE * LONG_PAUSE_MS  / 1000)
+    short_samples = int(SAMPLE_RATE * SHORT_PAUSE_MS / 1000)
+
+    segments: List[Union[str, int]] = []
+    for part in _TOKEN_RE.split(processed):
+        if part == _LONG_TOKEN:
+            segments.append(long_samples)
+        elif part == _SHORT_TOKEN:
+            segments.append(short_samples)
+        elif part.strip():
+            segments.append(part)
+
+    return segments
+
+
+def _expand_to_items(
+    segments: List[Union[str, int]],
+    split_pattern: str,
+) -> List[tuple]:
+    """
+    Expand pause segments into a flat list of ("chunk", str) and
+    ("silence", int) items, applying the user's split_pattern to each
+    text segment.
+    """
+    items = []
+    for seg in segments:
+        if isinstance(seg, int):
+            items.append(("silence", seg))
+        else:
+            if split_pattern:
+                chunks = [c.strip() for c in re.split(split_pattern, seg) if c.strip()]
+            else:
+                chunks = [seg.strip()] if seg.strip() else []
+            for chunk in chunks:
+                items.append(("chunk", chunk))
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +155,6 @@ def blend_voices(voice_specs: List[dict]):
     if len(tensors) == 1:
         return tensors[0]
 
-    # Renormalise weights for successfully loaded tensors
     w_total = sum(weights)
     weights = [w / w_total for w in weights]
     blended = sum(w * t for w, t in zip(weights, tensors))
@@ -112,12 +181,23 @@ class TTSEngine:
         return self._pipelines[lang_code]
 
     def _prepare_voice(self, voice_specs: List[dict]):
-        """Return a voice string or blended tensor."""
         if not voice_specs:
             return "af_heart"
         if len(voice_specs) == 1:
             return voice_specs[0]["voice_id"]
         return blend_voices(voice_specs)
+
+    def _synthesise_chunk(self, pipeline, chunk: str, voice, speed: float) -> List[np.ndarray]:
+        """Run one text chunk through the pipeline, return list of audio arrays."""
+        parts = []
+        for _gs, _ps, audio in pipeline(chunk, voice=voice, speed=speed):
+            if audio is not None and len(audio) > 0:
+                parts.append(np.array(audio, dtype=np.float32))
+        return parts
+
+    # ------------------------------------------------------------------
+    # Public: full generation
+    # ------------------------------------------------------------------
 
     def generate_audio(
         self,
@@ -132,60 +212,61 @@ class TTSEngine:
         progress_callback: Callable[[int, int], None],
         cancel_flag: threading.Event,
     ) -> str:
-        """
-        Generate audio from text, apply post-processing, and save to file.
-        Returns the output path. Raises on complete failure; saves partial
-        audio if some chunks succeeded before cancellation/error.
-        """
         from audio_processing import post_process
 
         pipeline = self._get_pipeline(lang_code)
-        voice = self._prepare_voice(voice_specs)
+        voice    = self._prepare_voice(voice_specs)
 
-        # Split text into chunks
-        if split_pattern:
-            chunks = [c.strip() for c in re.split(split_pattern, text) if c.strip()]
-        else:
-            chunks = [text.strip()] if text.strip() else []
+        # Parse (...) pause markers, then expand text segments into chunks
+        pause_segments = _parse_pause_segments(text)
+        items = _expand_to_items(pause_segments, split_pattern)
 
-        if not chunks:
+        text_chunks = [v for t, v in items if t == "chunk"]
+        total_chunks = len(text_chunks)
+
+        if total_chunks == 0:
             raise ValueError("No text to generate after splitting")
 
         all_audio: List[np.ndarray] = []
         failed_chunk: Optional[int] = None
+        chunk_idx = 0
 
-        for i, chunk in enumerate(chunks):
+        for item_type, item_val in items:
             if cancel_flag.is_set():
-                logger.info("Cancelled at chunk %d/%d", i + 1, len(chunks))
+                logger.info("Cancelled at chunk %d/%d", chunk_idx, total_chunks)
                 break
-            try:
-                for _gs, _ps, audio in pipeline(chunk, voice=voice, speed=speed):
-                    if cancel_flag.is_set():
-                        break
-                    if audio is not None and len(audio) > 0:
-                        all_audio.append(np.array(audio, dtype=np.float32))
-            except Exception as exc:
-                logger.error("Error on chunk %d: %s", i + 1, exc)
-                failed_chunk = i + 1
-                # Continue to save partial audio rather than aborting
-            finally:
-                progress_callback(i + 1, len(chunks))
+
+            if item_type == "silence":
+                # Insert silence for (...) pause markers
+                all_audio.append(np.zeros(item_val, dtype=np.float32))
+            else:
+                try:
+                    parts = self._synthesise_chunk(pipeline, item_val, voice, speed)
+                    all_audio.extend(parts)
+                except Exception as exc:
+                    logger.error("Error on chunk %d: %s", chunk_idx + 1, exc)
+                    failed_chunk = chunk_idx + 1
+                finally:
+                    chunk_idx += 1
+                    progress_callback(chunk_idx, total_chunks)
 
         if not all_audio:
             raise RuntimeError("No audio was generated")
 
         combined = np.concatenate(all_audio)
         combined = post_process(combined, SAMPLE_RATE, post_proc_options)
-
         self._save_audio(combined, output_path, output_format)
 
         if failed_chunk is not None:
             raise RuntimeError(
-                f"Partial audio saved to {output_path} "
-                f"(chunk {failed_chunk} failed)"
+                f"Partial audio saved to {output_path} (chunk {failed_chunk} failed)"
             )
 
         return output_path
+
+    # ------------------------------------------------------------------
+    # Public: preview (first 200 chars, played via sounddevice)
+    # ------------------------------------------------------------------
 
     def preview_audio(
         self,
@@ -194,7 +275,6 @@ class TTSEngine:
         lang_code: str,
         speed: float,
     ) -> None:
-        """Generate and play up to 200 chars of audio without saving."""
         import sounddevice as sd
 
         preview_text = text[:200].strip()
@@ -202,12 +282,18 @@ class TTSEngine:
             raise ValueError("No text for preview")
 
         pipeline = self._get_pipeline(lang_code)
-        voice = self._prepare_voice(voice_specs)
+        voice    = self._prepare_voice(voice_specs)
+
+        # Honour pause markers even in preview
+        pause_segments = _parse_pause_segments(preview_text)
+        items = _expand_to_items(pause_segments, split_pattern="")
 
         all_audio: List[np.ndarray] = []
-        for _gs, _ps, audio in pipeline(preview_text, voice=voice, speed=speed):
-            if audio is not None and len(audio) > 0:
-                all_audio.append(np.array(audio, dtype=np.float32))
+        for item_type, item_val in items:
+            if item_type == "silence":
+                all_audio.append(np.zeros(item_val, dtype=np.float32))
+            else:
+                all_audio.extend(self._synthesise_chunk(pipeline, item_val, voice, speed))
 
         if not all_audio:
             raise RuntimeError("No audio generated for preview")
@@ -250,12 +336,8 @@ class TTSEngine:
         except ImportError:
             wav_path = path.replace(".mp3", ".wav")
             sf.write(wav_path, audio, SAMPLE_RATE, format="WAV")
-            raise RuntimeError(
-                f"pydub not installed; saved as WAV instead: {wav_path}"
-            )
+            raise RuntimeError(f"pydub not installed; saved as WAV instead: {wav_path}")
         except Exception as exc:
             wav_path = path.replace(".mp3", ".wav")
             sf.write(wav_path, audio, SAMPLE_RATE, format="WAV")
-            raise RuntimeError(
-                f"MP3 export failed ({exc}); saved as WAV: {wav_path}"
-            )
+            raise RuntimeError(f"MP3 export failed ({exc}); saved as WAV: {wav_path}")
