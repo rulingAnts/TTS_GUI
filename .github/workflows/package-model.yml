@@ -1,0 +1,191 @@
+name: Package Kokoro Model Weights
+
+# Run manually from the Actions tab whenever you need a fresh download.
+on:
+  workflow_dispatch:
+    inputs:
+      hf_repo:
+        description: 'Hugging Face repo ID'
+        required: true
+        default: 'hexgrad/Kokoro-82M'
+      skip_pip_cache:
+        description: 'Skip pre-warming the kokoro pip runtime cache'
+        type: boolean
+        default: false
+
+jobs:
+  download-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required to create releases and upload assets
+
+    steps:
+      # ── 1. Python ─────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── 2. System deps (espeak-ng lets Kokoro initialise fully) ───────
+      - name: Install espeak-ng
+        run: sudo apt-get update -qq && sudo apt-get install -y espeak-ng
+
+      # ── 3. Python deps ─────────────────────────────────────────────────
+      - name: Install Python dependencies
+        run: pip install --quiet huggingface-hub "kokoro>=0.9.4" soundfile numpy
+
+      # ── 4. Download HF model repo ──────────────────────────────────────
+      #    Gets: kokoro-v1_0.pth, voices/*.pt, config.json
+      #    Skips: samples/, eval/, markdown docs (saves ~30 MB)
+      - name: Download model from Hugging Face
+        run: |
+          python - <<'PYEOF'
+          from huggingface_hub import snapshot_download
+          import os
+
+          repo = os.environ["HF_REPO"]
+          print(f"Downloading {repo} …")
+          path = snapshot_download(
+              repo_id=repo,
+              local_dir="bundle/Kokoro-82M",
+              ignore_patterns=[
+                  "samples/*", "eval/*",
+                  "*.md", "*.txt", ".gitattributes",
+              ],
+          )
+          print(f"Downloaded to: {path}")
+          PYEOF
+        env:
+          HF_REPO: ${{ inputs.hf_repo }}
+
+      # ── 5. Pre-warm kokoro pip runtime cache ───────────────────────────
+      #    The `kokoro` pip package downloads its own ONNX runtime files
+      #    (kokoro-v1.0.onnx + voices-v1.0.bin) on first pipeline init.
+      #    We capture those so the zip works completely offline.
+      - name: Pre-warm Kokoro pip runtime cache
+        if: ${{ !inputs.skip_pip_cache }}
+        run: |
+          python - <<'PYEOF'
+          print("Initialising Kokoro pipeline to trigger runtime downloads …")
+          try:
+              from kokoro import KPipeline
+              # Instantiate one pipeline per language so all runtime files land
+              for code in ["a", "b"]:
+                  KPipeline(lang_code=code)
+                  print(f"  lang_code={code} OK")
+          except Exception as e:
+              print(f"Warning (non-fatal): {e}")
+          PYEOF
+
+      # ── 6. Collect pip runtime cache files ────────────────────────────
+      - name: Collect pip runtime cache
+        if: ${{ !inputs.skip_pip_cache }}
+        run: |
+          for cache_dir in \
+              "$HOME/.cache/kokoro-onnx" \
+              "$HOME/.cache/huggingface/hub"; do
+            if [ -d "$cache_dir" ]; then
+              TARGET="bundle/pip-cache/$(basename $cache_dir)"
+              cp -r "$cache_dir" "$TARGET"
+              echo "Copied $cache_dir → $TARGET"
+            fi
+          done
+
+      # ── 7. Write placement README ──────────────────────────────────────
+      - name: Write README
+        run: |
+          cat > bundle/README.txt <<'EOF'
+          Kokoro TTS Studio — offline model bundle
+          =========================================
+
+          Contents
+          --------
+          Kokoro-82M/         Model weights and voice tensors from hexgrad/Kokoro-82M
+            voices/*.pt       Individual voice style tensors (for voice blending)
+            kokoro-v1_0.pth   Main model weights
+            config.json       Model configuration
+
+          pip-cache/          Runtime files downloaded by the `kokoro` pip package
+            kokoro-onnx/      ONNX model and voices binary (used by KPipeline)
+            huggingface/hub/  HuggingFace hub snapshot cache
+
+          How to use
+          ----------
+          1. Extract this zip.
+          2. Copy pip-cache/kokoro-onnx/  →  ~/.cache/kokoro-onnx/
+             Copy pip-cache/huggingface/  →  ~/.cache/huggingface/
+          3. The app and `kokoro` pip package will find the cached files
+             and skip any network downloads.
+
+          For voice blending in Kokoro TTS Studio, the app also searches
+          Kokoro-82M/voices/ — place or symlink that folder wherever
+          convenient and update the voice tensor search paths in tts_engine.py
+          if needed.
+
+          License
+          -------
+          Model weights: Apache 2.0 (hexgrad/Kokoro-82M)
+          See https://huggingface.co/hexgrad/Kokoro-82M
+          EOF
+
+      # ── 8. Zip ─────────────────────────────────────────────────────────
+      - name: Create zip archive
+        id: zip
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          REPO_SLUG=$(echo "${{ inputs.hf_repo }}" | tr '/' '-' | tr '[:upper:]' '[:lower:]')
+          ZIP_NAME="${REPO_SLUG}-weights-${DATE}.zip"
+          zip -r "$ZIP_NAME" bundle/
+          SIZE=$(du -sh "$ZIP_NAME" | cut -f1)
+          echo "zip_name=$ZIP_NAME"   >> "$GITHUB_OUTPUT"
+          echo "zip_size=$SIZE"       >> "$GITHUB_OUTPUT"
+          echo "date=$DATE"           >> "$GITHUB_OUTPUT"
+          echo "Created $ZIP_NAME ($SIZE)"
+
+      # ── 9. Upload as workflow artifact (backup, 90-day expiry) ─────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kokoro-model-weights-${{ steps.zip.outputs.date }}
+          path: ${{ steps.zip.outputs.zip_name }}
+          retention-days: 90
+
+      # ── 10. Create GitHub Release and attach zip ───────────────────────
+      #     This gives you a permanent, direct download link on github.com.
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="model-weights-${{ steps.zip.outputs.date }}"
+          ZIP="${{ steps.zip.outputs.zip_name }}"
+          SIZE="${{ steps.zip.outputs.size }}"
+          REPO="${{ inputs.hf_repo }}"
+
+          gh release create "$TAG" \
+            --title "Kokoro Model Weights — ${{ steps.zip.outputs.date }}" \
+            --notes "$(cat <<NOTES
+          ## Kokoro 82M — pre-packaged model weights
+
+          Offline bundle for **Kokoro TTS Studio**.
+          Source: \`${REPO}\` on Hugging Face (Apache 2.0)
+
+          ### Contents
+          - Voice style tensors (\`voices/*.pt\`) for all supported languages
+          - Main model weights (\`kokoro-v1_0.pth\`)
+          - Pre-warmed \`kokoro\` pip runtime cache (ONNX files)
+
+          ### Install
+          Extract the zip and follow the instructions in \`README.txt\`
+          inside the archive. No HuggingFace access required after this.
+
+          ---
+          *Generated by the [Package Kokoro Model Weights](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) workflow.*
+          NOTES
+          )" \
+            --repo "${{ github.repository }}" \
+            "$ZIP"
+
+          echo ""
+          echo "✅ Release created."
+          echo "   Download URL:"
+          echo "   ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"

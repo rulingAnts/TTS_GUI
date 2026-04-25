@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kokoro TTS Studio</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+
+    <header class="app-header">
+      <div class="logo">
+        <span class="logo-icon">◉</span>
+        <span class="logo-text">Kokoro TTS Studio</span>
+      </div>
+    </header>
+
+    <main class="main-content">
+
+      <!-- ═══════════════════════════════════════════════ Column 1: Text -->
+      <section class="col col-text">
+        <div class="col-header">
+          <h2>Text Input</h2>
+          <div class="col-header-actions">
+            <button id="btn-load-file" class="btn btn-secondary btn-small">Load .txt</button>
+            <button id="btn-clear" class="btn btn-ghost btn-small">Clear</button>
+          </div>
+        </div>
+
+        <div class="text-area-wrap">
+          <textarea
+            id="text-input"
+            placeholder="Type or paste text here, or load a .txt file…"
+            spellcheck="true"
+          ></textarea>
+        </div>
+
+        <div class="char-count-bar">
+          <span id="char-count">0 characters</span>
+          <span id="char-warning" class="char-warning hidden">
+            ⚠ Long text — paragraph splits recommended
+          </span>
+        </div>
+      </section>
+
+      <!-- ══════════════════════════════════════ Column 2: Voice & Params -->
+      <section class="col col-voice">
+        <div class="col-header">
+          <h2>Voice &amp; Generation</h2>
+        </div>
+
+        <div class="col-scroll">
+
+          <!-- Primary Voice ------------------------------------------- -->
+          <div class="section-group">
+            <h3 class="group-label">Primary Voice</h3>
+
+            <div class="form-row">
+              <label for="v1-language">Language</label>
+              <select id="v1-language" class="select"></select>
+            </div>
+            <div class="form-row">
+              <label for="v1-accent">Accent</label>
+              <select id="v1-accent" class="select"></select>
+            </div>
+            <div class="form-row">
+              <label>Gender</label>
+              <div class="radio-group">
+                <label class="radio-label"><input type="radio" name="v1-gender" value="all" checked> All</label>
+                <label class="radio-label"><input type="radio" name="v1-gender" value="female"> Female</label>
+                <label class="radio-label"><input type="radio" name="v1-gender" value="male"> Male</label>
+              </div>
+            </div>
+            <div class="form-row">
+              <label for="v1-voice">Voice</label>
+              <select id="v1-voice" class="select"></select>
+            </div>
+          </div>
+
+          <!-- Voice Blending ------------------------------------------ -->
+          <div class="section-group">
+            <div class="toggle-row">
+              <label class="toggle-label">
+                <input type="checkbox" id="blend-enable">
+                Enable voice blending
+              </label>
+            </div>
+
+            <div id="blend-panel" class="blend-panel hidden">
+
+              <!-- Voice 2 -->
+              <div class="blend-voice" id="blend-v2-block">
+                <div class="blend-voice-header">
+                  <span class="blend-voice-tag v2-tag">Voice 2</span>
+                </div>
+                <div class="form-row">
+                  <label for="v2-language">Language</label>
+                  <select id="v2-language" class="select"></select>
+                </div>
+                <div class="form-row">
+                  <label for="v2-accent">Accent</label>
+                  <select id="v2-accent" class="select"></select>
+                </div>
+                <div class="form-row">
+                  <label>Gender</label>
+                  <div class="radio-group">
+                    <label class="radio-label"><input type="radio" name="v2-gender" value="all" checked> All</label>
+                    <label class="radio-label"><input type="radio" name="v2-gender" value="female"> Female</label>
+                    <label class="radio-label"><input type="radio" name="v2-gender" value="male"> Male</label>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <label for="v2-voice">Voice</label>
+                  <select id="v2-voice" class="select"></select>
+                </div>
+
+                <div class="blend-ratio-section">
+                  <span class="blend-ratio-label">Voice 1 ←→ Voice 2</span>
+                  <div class="blend-slider-row">
+                    <span class="blend-pole v1-pole">V1</span>
+                    <input type="range" id="blend-ratio-12" class="blend-slider" min="0" max="100" value="50">
+                    <span class="blend-pole v2-pole">V2</span>
+                    <span id="blend-ratio-12-display" class="blend-ratio-display">50% / 50%</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Add Voice 3 -->
+              <button id="btn-add-v3" class="btn btn-secondary btn-small btn-add-voice">+ Add Voice 3</button>
+
+              <!-- Voice 3 (hidden until added) -->
+              <div class="blend-voice hidden" id="blend-v3-block">
+                <div class="blend-voice-header">
+                  <span class="blend-voice-tag v3-tag">Voice 3</span>
+                  <button id="btn-remove-v3" class="btn btn-ghost btn-small">✕ Remove</button>
+                </div>
+                <div class="form-row">
+                  <label for="v3-language">Language</label>
+                  <select id="v3-language" class="select"></select>
+                </div>
+                <div class="form-row">
+                  <label for="v3-accent">Accent</label>
+                  <select id="v3-accent" class="select"></select>
+                </div>
+                <div class="form-row">
+                  <label>Gender</label>
+                  <div class="radio-group">
+                    <label class="radio-label"><input type="radio" name="v3-gender" value="all" checked> All</label>
+                    <label class="radio-label"><input type="radio" name="v3-gender" value="female"> Female</label>
+                    <label class="radio-label"><input type="radio" name="v3-gender" value="male"> Male</label>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <label for="v3-voice">Voice</label>
+                  <select id="v3-voice" class="select"></select>
+                </div>
+
+                <div class="blend-ratio-section">
+                  <span class="blend-ratio-label">Voice 3 weight</span>
+                  <div class="blend-slider-row">
+                    <span class="blend-pole" style="color:var(--text-muted)">0%</span>
+                    <input type="range" id="blend-weight-3" class="blend-slider v3-slider" min="0" max="100" value="33">
+                    <span class="blend-pole v3-pole">V3</span>
+                    <span id="blend-weight-3-display" class="blend-ratio-display">33%</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Blend spec readout -->
+              <div class="blend-spec-bar">
+                <span class="blend-spec-key">Blend spec</span>
+                <code id="blend-spec-display">—</code>
+              </div>
+
+            </div><!-- /blend-panel -->
+          </div>
+
+          <!-- Generation Parameters ----------------------------------- -->
+          <div class="section-group">
+            <h3 class="group-label">Generation</h3>
+
+            <div class="form-row">
+              <label for="speed-slider">Speed</label>
+              <div class="slider-with-value">
+                <input type="range" id="speed-slider" class="slider" min="0.5" max="2.0" step="0.05" value="1.0">
+                <span id="speed-value" class="slider-value">1.00×</span>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <label for="output-format">Format</label>
+              <select id="output-format" class="select select-small">
+                <option value="wav" selected>WAV — lossless</option>
+                <option value="flac">FLAC — lossless compressed</option>
+                <option value="mp3">MP3 — compressed</option>
+              </select>
+            </div>
+
+            <div class="form-row">
+              <label for="split-pattern">Split on</label>
+              <select id="split-pattern" class="select">
+                <option value="\\n\\n+" selected>Paragraph breaks</option>
+                <option value="\\n+">Single line breaks</option>
+                <option value="[.!?]+">Sentences</option>
+                <option value="">No splitting</option>
+              </select>
+            </div>
+
+            <div class="form-row">
+              <label for="output-filename">Filename</label>
+              <input type="text" id="output-filename" class="text-input" placeholder="output_{timestamp}">
+            </div>
+
+            <div class="form-row">
+              <label for="output-dir">Output dir</label>
+              <div class="path-input-group">
+                <input type="text" id="output-dir" class="text-input" placeholder="./outputs">
+                <button id="btn-browse-dir" class="btn btn-secondary btn-small">Browse</button>
+              </div>
+            </div>
+          </div>
+
+        </div><!-- /col-scroll -->
+      </section>
+
+      <!-- ══════════════════════════════════════ Column 3: Post-processing -->
+      <section class="col col-processing">
+        <div class="col-header">
+          <h2>Post-Processing</h2>
+        </div>
+
+        <div class="col-scroll">
+          <div class="section-group">
+
+            <div class="proc-item">
+              <label class="checkbox-label">
+                <input type="checkbox" id="proc-normalize" checked>
+                Normalize volume
+              </label>
+            </div>
+
+            <div class="proc-item">
+              <label class="checkbox-label">
+                <input type="checkbox" id="proc-trim">
+                Trim silence
+              </label>
+              <div id="trim-options" class="sub-options hidden">
+                <label class="sub-label">Threshold</label>
+                <div class="slider-with-value">
+                  <input type="range" id="trim-db" class="slider" min="-60" max="0" step="1" value="-40">
+                  <span id="trim-db-value" class="slider-value">−40 dB</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="proc-item">
+              <label class="checkbox-label">
+                <input type="checkbox" id="proc-noise-gate">
+                Noise gate
+              </label>
+            </div>
+
+            <div class="proc-item">
+              <label class="checkbox-label">
+                <input type="checkbox" id="proc-fade-in">
+                Fade in
+              </label>
+              <div id="fade-in-options" class="sub-options hidden">
+                <label class="sub-label">Duration</label>
+                <div class="slider-with-value">
+                  <input type="range" id="fade-in-ms" class="slider" min="0" max="500" step="10" value="100">
+                  <span id="fade-in-ms-value" class="slider-value">100 ms</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="proc-item">
+              <label class="checkbox-label">
+                <input type="checkbox" id="proc-fade-out">
+                Fade out
+              </label>
+              <div id="fade-out-options" class="sub-options hidden">
+                <label class="sub-label">Duration</label>
+                <div class="slider-with-value">
+                  <input type="range" id="fade-out-ms" class="slider" min="0" max="500" step="10" value="100">
+                  <span id="fade-out-ms-value" class="slider-value">100 ms</span>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- ══════════════════════════════════════════════════ Bottom Bar -->
+    <footer class="bottom-bar">
+      <div class="action-buttons">
+        <button id="btn-preview"     class="btn btn-primary">▶ Preview</button>
+        <button id="btn-generate"    class="btn btn-accent">⬡ Generate</button>
+        <button id="btn-play-last"   class="btn btn-secondary" disabled>▷ Play Last</button>
+        <button id="btn-open-folder" class="btn btn-ghost">⎆ Open Folder</button>
+      </div>
+
+      <div class="progress-area" id="progress-area">
+        <div class="progress-track">
+          <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+        </div>
+        <span class="progress-label" id="progress-label"></span>
+      </div>
+
+      <div class="status-wrap">
+        <span id="status-text" class="status-idle">Ready</span>
+      </div>
+    </footer>
+
+  </div><!-- /app -->
+
+  <!-- Startup error modal -->
+  <div id="startup-modal" class="modal hidden">
+    <div class="modal-box">
+      <h2 class="modal-title">⚠ Startup Warning</h2>
+      <p id="modal-body"></p>
+      <button class="btn btn-primary" onclick="document.getElementById('startup-modal').classList.add('hidden')">Dismiss</button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
