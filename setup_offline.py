@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-setup_offline.py — Unpack the Kokoro model weights zip downloaded from
-GitHub Releases and place everything where the app expects it.
+setup_offline.py — Place Kokoro model weights where the app expects them.
 
-Run once after downloading the zip:
+Accepts either a zip file or an already-extracted bundle directory:
     python setup_offline.py /path/to/hexgrad-kokoro-82m-weights-YYYYMMDD.zip
+    python setup_offline.py /path/to/bundle
 
-If you don't pass a path the script searches ~/Downloads automatically.
+If no path is given the script searches ~/Downloads for a matching zip or
+a 'bundle' folder automatically.
+
+pip-cache layout produced by the GitHub Actions workflow:
+    pip-cache/hub/          → ~/.cache/huggingface/hub/
+    pip-cache/kokoro-onnx/  → ~/.cache/kokoro-onnx/   (if present)
 """
 
 import shutil
@@ -18,9 +23,19 @@ PROJECT_DIR = Path(__file__).parent
 MODELS_DIR  = PROJECT_DIR / "models"
 HOME_CACHE  = Path.home() / ".cache"
 
+# Maps folder name inside pip-cache/ → destination under ~/.cache/
+PIP_CACHE_MAP = {
+    "hub":         HOME_CACHE / "huggingface" / "hub",
+    "kokoro-onnx": HOME_CACHE / "kokoro-onnx",
+}
 
-def find_zip_in_downloads() -> Path | None:
+
+def find_bundle_in_downloads() -> Path | None:
     downloads = Path.home() / "Downloads"
+    # Prefer an already-extracted bundle/ dir
+    if (downloads / "bundle").is_dir():
+        return downloads / "bundle"
+    # Fall back to the most recently modified matching zip
     candidates = sorted(
         list(downloads.glob("*kokoro*weights*.zip")) +
         list(downloads.glob("hexgrad-*weights*.zip")),
@@ -32,42 +47,50 @@ def find_zip_in_downloads() -> Path | None:
 
 def copy_tree(src: Path, dst: Path) -> None:
     """Copy src into dst, merging if dst already exists."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists():
         shutil.copytree(src, dst, dirs_exist_ok=True)
     else:
         shutil.copytree(src, dst)
 
 
-def main() -> None:
-    # ── Locate zip ────────────────────────────────────────────────────────
-    if len(sys.argv) >= 2:
-        zip_path = Path(sys.argv[1])
-    else:
-        zip_path = find_zip_in_downloads()
-        if zip_path:
-            print(f"Found zip: {zip_path}")
-        else:
-            print("Usage: python setup_offline.py <path-to-weights.zip>")
-            print("       (or drop the zip in ~/Downloads and re-run without args)")
-            sys.exit(1)
+def resolve_bundle(arg: Path) -> Path:
+    """Return the bundle/ directory, extracting a zip if necessary."""
+    if arg.is_dir():
+        # Already a directory — use it directly
+        return arg
 
-    if not zip_path.exists():
-        print(f"Error: file not found: {zip_path}")
-        sys.exit(1)
-
-    # ── Extract to a temp dir ─────────────────────────────────────────────
+    # It's a zip — extract to a temp dir
     tmp = PROJECT_DIR / "_extract_tmp"
     tmp.mkdir(exist_ok=True)
-    print(f"Extracting {zip_path.name} …")
-    with zipfile.ZipFile(zip_path, "r") as zf:
+    print(f"Extracting {arg.name} …")
+    with zipfile.ZipFile(arg, "r") as zf:
         zf.extractall(tmp)
-
     bundle = tmp / "bundle"
-    if not bundle.exists():
-        # Some zips land without a bundle/ prefix — handle both layouts
-        bundle = tmp
+    return bundle if bundle.exists() else tmp
 
-    # ── 1. Model weights + voice tensors → models/Kokoro-82M/ ────────────
+
+def main() -> None:
+    # ── Locate source ─────────────────────────────────────────────────────
+    if len(sys.argv) >= 2:
+        source = Path(sys.argv[1])
+    else:
+        source = find_bundle_in_downloads()
+        if source:
+            print(f"Found: {source}")
+        else:
+            print("Usage: python setup_offline.py <bundle-dir-or-zip>")
+            print("       (or place bundle/ or a matching zip in ~/Downloads)")
+            sys.exit(1)
+
+    if not source.exists():
+        print(f"Error: not found: {source}")
+        sys.exit(1)
+
+    bundle = resolve_bundle(source)
+    tmp_to_clean = PROJECT_DIR / "_extract_tmp"
+
+    # ── 1. Voice tensors + model weights → models/Kokoro-82M/ ────────────
     kokoro_src = bundle / "Kokoro-82M"
     if kokoro_src.exists():
         dest = MODELS_DIR / "Kokoro-82M"
@@ -78,33 +101,33 @@ def main() -> None:
         voices_dir = dest / "voices"
         n_voices = len(list(voices_dir.glob("*.pt"))) if voices_dir.exists() else 0
         print(f"  ✓ {n_voices} voice tensors")
-        if (dest / "kokoro-v1_0.pth").exists():
-            print("  ✓ kokoro-v1_0.pth")
+        print(f"  ✓ kokoro-v1_0.pth" if (dest / "kokoro-v1_0.pth").exists() else "  ⚠ kokoro-v1_0.pth not found")
     else:
-        print("  ⚠ Kokoro-82M/ folder not found in zip — skipping model copy")
+        print("  ⚠ Kokoro-82M/ not found in bundle — skipping model copy")
 
-    # ── 2. Pip runtime cache → ~/.cache/ ──────────────────────────────────
+    # ── 2. Pip runtime cache → ~/.cache/ with explicit path mapping ───────
     pip_cache_src = bundle / "pip-cache"
     if pip_cache_src.exists():
-        HOME_CACHE.mkdir(exist_ok=True)
-        for item in pip_cache_src.iterdir():
-            if not item.is_dir():
-                continue
-            dest = HOME_CACHE / item.name
-            print(f"Copying pip cache {item.name} → {dest} …")
-            copy_tree(item, dest)
-            print(f"  ✓ Done")
+        for folder_name, cache_dest in PIP_CACHE_MAP.items():
+            src = pip_cache_src / folder_name
+            if src.is_dir():
+                print(f"Copying pip-cache/{folder_name}/ → {cache_dest} …")
+                copy_tree(src, cache_dest)
+                print(f"  ✓ Done")
+            else:
+                print(f"  — pip-cache/{folder_name}/ not present, skipping")
     else:
-        print("  ⚠ pip-cache/ folder not found in zip — skipping cache copy")
+        print("  ⚠ pip-cache/ not found in bundle — skipping cache copy")
 
-    # ── Cleanup ────────────────────────────────────────────────────────────
-    shutil.rmtree(tmp)
+    # ── Cleanup temp extraction dir (not the user's bundle dir) ──────────
+    if tmp_to_clean.exists():
+        shutil.rmtree(tmp_to_clean)
 
     # ── Report ────────────────────────────────────────────────────────────
     print()
-    print("✅  Setup complete. File layout:")
-    print(f"   {MODELS_DIR}/Kokoro-82M/voices/   ← voice tensors (blending)")
-    print(f"   {HOME_CACHE}/huggingface/          ← kokoro pip runtime cache")
+    print("✅  Setup complete.")
+    print(f"   {MODELS_DIR}/Kokoro-82M/voices/  ← voice tensors (blending)")
+    print(f"   {HOME_CACHE}/huggingface/hub/     ← HF hub cache (pipeline)")
     print()
     print("Run the app:  python main.py")
 
