@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Kokoro TTS Studio — pywebview desktop app entry point.
 
