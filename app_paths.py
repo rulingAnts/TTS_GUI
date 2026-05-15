@@ -78,6 +78,30 @@ def get_espeak_data_path() -> Path:
 
 # ── espeak-ng environment setup ───────────────────────────────────────────
 
+def _augment_path() -> None:
+    """
+    Prepend common Homebrew / system binary dirs to PATH.
+
+    GUI apps launched outside a shell (IDLE, Finder, PyInstaller bundles)
+    receive a minimal system PATH that omits /opt/homebrew/bin, so Homebrew-
+    installed tools like espeak-ng are invisible without this.
+    """
+    candidates = [
+        "/opt/homebrew/bin",   # Homebrew — Apple Silicon
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",      # Homebrew — Intel Mac / manual installs
+        "/usr/local/sbin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]
+    current = os.environ.get("PATH", "").split(os.pathsep)
+    additions = [p for p in candidates if p not in current and Path(p).is_dir()]
+    if additions:
+        os.environ["PATH"] = os.pathsep.join(additions + current)
+
+
 def setup_espeak_env() -> None:
     """
     Configure espeak-ng so kokoro / misaki / phonemizer find the correct
@@ -87,6 +111,9 @@ def setup_espeak_env() -> None:
       pre-built espeak-ng binaries as a pip package.
     • In a PyInstaller bundle: points env vars at _MEIPASS/espeak-ng-data.
     """
+    # Fix PATH first so espeak-ng is findable regardless of launch method
+    _augment_path()
+
     if getattr(sys, "frozen", False):
         # Bundled mode — point to files extracted by PyInstaller
         data_dir = get_espeak_data_path()
