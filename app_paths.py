@@ -94,23 +94,34 @@ def _augment_path() -> None:
     if shutil.which("espeak-ng"):
         return
 
+    # Executable name differs by platform
+    exe = "espeak-ng.exe" if sys.platform == "win32" else "espeak-ng"
+
     candidates = [
-        "/opt/homebrew/bin",   # Homebrew — Apple Silicon
+        # macOS — Apple Silicon (arm64)
+        "/opt/homebrew/bin",
         "/opt/homebrew/sbin",
-        "/usr/local/bin",      # Homebrew — Intel Mac / manual installs
+        # macOS — Intel (x86_64) / manual installs
+        "/usr/local/bin",
         "/usr/local/sbin",
+        # macOS / Linux — system paths
         "/usr/bin",
         "/bin",
         "/usr/sbin",
         "/sbin",
+        # Windows — default espeak-ng installer locations
+        r"C:\Program Files\eSpeak NG",
+        r"C:\Program Files (x86)\eSpeak NG",
+        r"C:\Program Files\eSpeak",
+        r"C:\Program Files (x86)\eSpeak",
     ]
     current = os.environ.get("PATH", "").split(os.pathsep)
 
-    # Only add directories that both exist AND contain espeak-ng
+    # Only add directories that both exist AND contain the espeak-ng binary
     verified = [
         p for p in candidates
         if p not in current
-        and (Path(p) / "espeak-ng").exists()
+        and (Path(p) / exe).exists()
     ]
 
     if verified:
