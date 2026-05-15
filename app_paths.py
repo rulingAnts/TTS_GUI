@@ -80,12 +80,20 @@ def get_espeak_data_path() -> Path:
 
 def _augment_path() -> None:
     """
-    Prepend common Homebrew / system binary dirs to PATH.
+    Verify that espeak-ng is reachable on PATH; if not, probe common
+    Homebrew / system binary directories and add the ones that actually
+    contain an espeak-ng executable.
 
     GUI apps launched outside a shell (IDLE, Finder, PyInstaller bundles)
     receive a minimal system PATH that omits /opt/homebrew/bin, so Homebrew-
     installed tools like espeak-ng are invisible without this.
     """
+    import shutil
+
+    # If espeak-ng is already on PATH, nothing to do
+    if shutil.which("espeak-ng"):
+        return
+
     candidates = [
         "/opt/homebrew/bin",   # Homebrew — Apple Silicon
         "/opt/homebrew/sbin",
@@ -97,9 +105,16 @@ def _augment_path() -> None:
         "/sbin",
     ]
     current = os.environ.get("PATH", "").split(os.pathsep)
-    additions = [p for p in candidates if p not in current and Path(p).is_dir()]
-    if additions:
-        os.environ["PATH"] = os.pathsep.join(additions + current)
+
+    # Only add directories that both exist AND contain espeak-ng
+    verified = [
+        p for p in candidates
+        if p not in current
+        and (Path(p) / "espeak-ng").exists()
+    ]
+
+    if verified:
+        os.environ["PATH"] = os.pathsep.join(verified + current)
 
 
 def setup_espeak_env() -> None:
