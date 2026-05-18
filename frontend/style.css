@@ -313,6 +313,56 @@ option.unavailable { color: var(--text-muted); font-style: italic; }
   cursor: pointer;
 }
 
+/* ── Engine tabs (segmented control) ─────────────────────────────────── */
+.engine-tabs {
+  display: flex;
+  flex: 1;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.engine-tab {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s, color 0.15s;
+}
+
+.engine-tab.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.engine-tab:hover:not(.active) { color: var(--text-secondary); }
+
+/* ── Piper model status bar ───────────────────────────────────────────── */
+.piper-model-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.piper-status-checking { color: var(--text-muted); }
+.piper-status-ready    { color: var(--success); font-weight: 600; }
+.piper-status-missing  { color: var(--warning); }
+
 /* ── Voice blend panel ────────────────────────────────────────────────── */
 .blend-panel { margin-top: 8px; }
 

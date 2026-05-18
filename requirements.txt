@@ -1,4 +1,5 @@
 kokoro>=0.9.4
+piper-tts
 soundfile
 numpy
 pywebview>=5.0

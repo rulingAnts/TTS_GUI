@@ -27,13 +27,16 @@ import webview
 
 # ── Step 3: app modules (may import torch/kokoro internally) ──────────────
 from tts_engine import TTSEngine
-from voice_data import VOICE_DATA, validate_voice_data
+from piper_engine import PiperEngine
+from voice_data import VOICE_DATA, PIPER_VOICE_DATA, validate_voice_data
 from app_paths import (
     get_frontend_path,
     get_setup_frontend_path,
     get_outputs_path,
     get_models_path,
+    get_piper_models_path,
     model_is_ready,
+    piper_model_is_ready,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -65,6 +68,7 @@ class Api:
     def __init__(self):
         self.window = None
         self._engine = TTSEngine()
+        self._piper_engine = PiperEngine()
         self._voice_data, self._unavailable = validate_voice_data()
         self._running = False
         self._progress = 0.0
@@ -73,13 +77,24 @@ class Api:
         self._cancel_flag = threading.Event()
         self._last_result: dict | None = None
         self._last_output_path: str | None = None
+        # Piper model download state
+        self._piper_downloading = False
+        self._piper_dl_progress = 0.0
+        self._piper_dl_status = ""
+        self._piper_dl_done = False
+        self._piper_dl_error: str | None = None
+        self._piper_dl_cancel = threading.Event()
 
     def get_voice_data(self) -> dict:
         try:
-            return {"voices": self._voice_data, "unavailable": self._unavailable}
+            return {
+                "voices": self._voice_data,
+                "unavailable": self._unavailable,
+                "piper_voices": PIPER_VOICE_DATA,
+            }
         except Exception as exc:
             logger.error("get_voice_data: %s", exc)
-            return {"voices": VOICE_DATA, "unavailable": [], "error": str(exc)}
+            return {"voices": VOICE_DATA, "unavailable": [], "piper_voices": PIPER_VOICE_DATA, "error": str(exc)}
 
     def generate(self, params: dict) -> dict:
         try:
@@ -105,12 +120,11 @@ class Api:
                 self._last_result = {"success": False, "error": "No text provided"}
                 return
 
-            voice_specs  = params.get("voices", [{"voice_id": "af_heart", "weight": 100}])
-            lang_code    = params.get("lang_code", "a")
-            speed        = float(params.get("speed", 1.0))
-            split_pat    = params.get("split_pattern", r"\n\n+")
-            out_fmt      = params.get("output_format", "wav").lower()
-            post_proc    = params.get("post_processing", {"normalize": True})
+            engine    = params.get("engine", "kokoro")
+            speed     = float(params.get("speed", 1.0))
+            split_pat = params.get("split_pattern", r"\n\n+")
+            out_fmt   = params.get("output_format", "wav").lower()
+            post_proc = params.get("post_processing", {"normalize": True})
 
             out_dir  = params.get("output_dir") or str(get_outputs_path())
             out_name = (params.get("output_filename") or "").strip()
@@ -126,18 +140,34 @@ class Api:
                 self._total_chunks  = total
                 self._progress = current / total if total > 0 else 0.0
 
-            result_path = self._engine.generate_audio(
-                text=text,
-                voice_specs=voice_specs,
-                lang_code=lang_code,
-                speed=speed,
-                split_pattern=split_pat,
-                post_proc_options=post_proc,
-                output_path=output_path,
-                output_format=out_fmt,
-                progress_callback=progress_cb,
-                cancel_flag=self._cancel_flag,
-            )
+            if engine == "piper":
+                piper_voice = params.get("piper_voice", "id_ID-argis-medium")
+                result_path = self._piper_engine.generate_audio(
+                    text=text,
+                    voice_id=piper_voice,
+                    speed=speed,
+                    split_pattern=split_pat,
+                    post_proc_options=post_proc,
+                    output_path=output_path,
+                    output_format=out_fmt,
+                    progress_callback=progress_cb,
+                    cancel_flag=self._cancel_flag,
+                )
+            else:
+                voice_specs = params.get("voices", [{"voice_id": "af_heart", "weight": 100}])
+                lang_code   = params.get("lang_code", "a")
+                result_path = self._engine.generate_audio(
+                    text=text,
+                    voice_specs=voice_specs,
+                    lang_code=lang_code,
+                    speed=speed,
+                    split_pattern=split_pat,
+                    post_proc_options=post_proc,
+                    output_path=output_path,
+                    output_format=out_fmt,
+                    progress_callback=progress_cb,
+                    cancel_flag=self._cancel_flag,
+                )
 
             self._last_output_path = result_path
             duration = 0.0
@@ -168,12 +198,23 @@ class Api:
             text = params.get("text", "")[:200].strip()
             if not text:
                 return {"success": False, "error": "No text for preview"}
-            self._engine.preview_audio(
-                text=text,
-                voice_specs=params.get("voices", [{"voice_id": "af_heart", "weight": 100}]),
-                lang_code=params.get("lang_code", "a"),
-                speed=float(params.get("speed", 1.0)),
-            )
+
+            engine = params.get("engine", "kokoro")
+            speed  = float(params.get("speed", 1.0))
+
+            if engine == "piper":
+                self._piper_engine.preview_audio(
+                    text=text,
+                    voice_id=params.get("piper_voice", "id_ID-argis-medium"),
+                    speed=speed,
+                )
+            else:
+                self._engine.preview_audio(
+                    text=text,
+                    voice_specs=params.get("voices", [{"voice_id": "af_heart", "weight": 100}]),
+                    lang_code=params.get("lang_code", "a"),
+                    speed=speed,
+                )
             return {"success": True, "error": None}
         except Exception as exc:
             logger.error("preview: %s", exc)
@@ -244,6 +285,54 @@ class Api:
 
     def get_default_output_dir(self) -> str:
         return str(get_outputs_path())
+
+    def get_piper_status(self) -> dict:
+        return {"ready": piper_model_is_ready()}
+
+    def start_piper_download(self) -> dict:
+        if self._running:
+            return {"started": False, "error": "Cannot download while generating"}
+        if self._piper_downloading:
+            return {"started": False, "error": "Already downloading"}
+        self._piper_dl_cancel.clear()
+        self._piper_downloading = True
+        self._piper_dl_progress = 0.0
+        self._piper_dl_status = "Starting…"
+        self._piper_dl_done = False
+        self._piper_dl_error = None
+        threading.Thread(target=self._piper_download_thread, daemon=True).start()
+        return {"started": True}
+
+    def get_piper_download_progress(self) -> dict:
+        return {
+            "downloading": self._piper_downloading,
+            "progress": self._piper_dl_progress,
+            "status": self._piper_dl_status,
+            "done": self._piper_dl_done,
+            "error": self._piper_dl_error,
+        }
+
+    def _piper_download_thread(self) -> None:
+        try:
+            from model_downloader import download_piper_model
+
+            dest = get_piper_models_path()
+            logger.info("Downloading Piper model to %s", dest)
+
+            def progress_cb(fraction: float, status: str) -> None:
+                self._piper_dl_progress = fraction
+                self._piper_dl_status = status
+
+            download_piper_model(dest, progress_cb, self._piper_dl_cancel)
+            self._piper_dl_done = True
+            self._piper_dl_status = "Download complete"
+            logger.info("Piper model download complete")
+        except Exception as exc:
+            logger.error("Piper download failed: %s", exc)
+            self._piper_dl_error = str(exc)
+        finally:
+            self._piper_downloading = False
+            self._piper_dl_progress = 1.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────

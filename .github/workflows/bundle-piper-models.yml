@@ -1,0 +1,45 @@
+name: Bundle Piper Models
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/bundle-piper-models.yml'
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Piper Indonesian model from HuggingFace
+        run: |
+          mkdir -p piper-models
+          BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/id/id_ID/argis/medium"
+          curl -fL "$BASE/id_ID-argis-medium.onnx"      -o piper-models/id_ID-argis-medium.onnx
+          curl -fL "$BASE/id_ID-argis-medium.onnx.json" -o piper-models/id_ID-argis-medium.onnx.json
+          echo "Downloaded files:"
+          ls -lh piper-models/
+
+      - name: Zip model files
+        run: |
+          cd piper-models
+          zip ../piper-id-argis-medium.zip id_ID-argis-medium.onnx id_ID-argis-medium.onnx.json
+          echo "Archive size: $(du -sh ../piper-id-argis-medium.zip | cut -f1)"
+
+      - name: Create or update GitHub release with model zip
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: piper-models-v1
+          name: "Piper Model Weights"
+          body: |
+            Indonesian Piper TTS model weights for in-app download.
+
+            - Voice: `id_ID-argis-medium` (Argis, male, medium quality)
+            - Engine: [Piper TTS](https://github.com/rhasspy/piper) / VITS
+            - Source: [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices) on HuggingFace
+          files: piper-id-argis-medium.zip
+          make_latest: false

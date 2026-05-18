@@ -56,30 +56,58 @@
           <div class="section-group">
             <h3 class="group-label">Primary Voice</h3>
 
+            <!-- Engine selector -->
             <div class="form-row">
-              <label for="v1-language">Language</label>
-              <select id="v1-language" class="select"></select>
-            </div>
-            <div class="form-row">
-              <label for="v1-accent">Accent</label>
-              <select id="v1-accent" class="select"></select>
-            </div>
-            <div class="form-row">
-              <label>Gender</label>
-              <div class="radio-group">
-                <label class="radio-label"><input type="radio" name="v1-gender" value="all" checked> All</label>
-                <label class="radio-label"><input type="radio" name="v1-gender" value="female"> Female</label>
-                <label class="radio-label"><input type="radio" name="v1-gender" value="male"> Male</label>
+              <label>Engine</label>
+              <div class="engine-tabs">
+                <button class="engine-tab active" id="engine-tab-kokoro" data-engine="kokoro">Kokoro</button>
+                <button class="engine-tab"        id="engine-tab-piper"  data-engine="piper">Piper</button>
               </div>
             </div>
-            <div class="form-row">
-              <label for="v1-voice">Voice</label>
-              <select id="v1-voice" class="select"></select>
+
+            <!-- Kokoro voice fields -->
+            <div id="kokoro-fields">
+              <div class="form-row">
+                <label for="v1-language">Language</label>
+                <select id="v1-language" class="select"></select>
+              </div>
+              <div class="form-row">
+                <label for="v1-accent">Accent</label>
+                <select id="v1-accent" class="select"></select>
+              </div>
+              <div class="form-row">
+                <label>Gender</label>
+                <div class="radio-group">
+                  <label class="radio-label"><input type="radio" name="v1-gender" value="all" checked> All</label>
+                  <label class="radio-label"><input type="radio" name="v1-gender" value="female"> Female</label>
+                  <label class="radio-label"><input type="radio" name="v1-gender" value="male"> Male</label>
+                </div>
+              </div>
+              <div class="form-row">
+                <label for="v1-voice">Voice</label>
+                <select id="v1-voice" class="select"></select>
+              </div>
+            </div>
+
+            <!-- Piper voice fields (hidden until Piper engine selected) -->
+            <div id="piper-fields" class="hidden">
+              <div class="form-row">
+                <label for="piper-language">Language</label>
+                <select id="piper-language" class="select"></select>
+              </div>
+              <div class="form-row">
+                <label for="piper-voice-select">Voice</label>
+                <select id="piper-voice-select" class="select"></select>
+              </div>
+              <div class="piper-model-status" id="piper-model-status">
+                <span id="piper-status-text" class="piper-status-checking">Checking…</span>
+                <button id="btn-download-piper" class="btn btn-primary btn-small hidden">⬇ Download (~63 MB)</button>
+              </div>
             </div>
           </div>
 
-          <!-- Voice Blending ------------------------------------------ -->
-          <div class="section-group">
+          <!-- Voice Blending (Kokoro only) ----------------------------- -->
+          <div class="section-group" id="kokoro-blend-section">
             <div class="toggle-row">
               <label class="toggle-label">
                 <input type="checkbox" id="blend-enable">

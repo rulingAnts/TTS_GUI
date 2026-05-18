@@ -4,12 +4,15 @@
 // State
 // ─────────────────────────────────────────────────────────────────────────────
 let voiceData = null;
+let piperVoiceData = null;
 let unavailableVoices = new Set();
 let progressInterval = null;
+let piperDlInterval = null;
 let isGenerating = false;
 let isPreviewing = false;
 let hasV3 = false;
 let lastOutputPath = null;
+let currentEngine = 'kokoro';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DOM references
@@ -31,6 +34,7 @@ function appInit() {
   initControls();
   initVoiceBlending();
   initPostProcessing();
+  initEngineTabs();
   loadVoiceData();
   loadDefaultOutputDir();
 }
@@ -55,10 +59,12 @@ async function loadVoiceData() {
     const result = await window.pywebview.api.get_voice_data();
     voiceData = result.voices;
     unavailableVoices = new Set(result.unavailable || []);
+    piperVoiceData = result.piper_voices || {};
 
     VOICE_SLOTS.forEach(slot => populateLanguages(slot));
-    // Trigger initial cascade for v1 so dropdowns aren't empty
     cascadeAccent(VOICE_SLOTS[0]);
+    populatePiperVoices();
+    checkPiperStatus();
     setStatus('Ready', 'idle');
   } catch (err) {
     setStatus('Failed to load voice data: ' + err, 'error');
@@ -70,6 +76,142 @@ async function loadDefaultOutputDir() {
     const dir = await window.pywebview.api.get_default_output_dir();
     if (dir) $('output-dir').value = dir;
   } catch (_) {}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Engine tabs
+// ─────────────────────────────────────────────────────────────────────────────
+function initEngineTabs() {
+  $$('.engine-tab').forEach(btn => {
+    btn.addEventListener('click', () => switchEngine(btn.dataset.engine));
+  });
+}
+
+function switchEngine(engine) {
+  currentEngine = engine;
+
+  // Update tab active states
+  $$('.engine-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.engine === engine);
+  });
+
+  const isKokoro = engine === 'kokoro';
+
+  // Swap voice panels
+  $('kokoro-fields').classList.toggle('hidden', !isKokoro);
+  $('piper-fields').classList.toggle('hidden', isKokoro);
+
+  // Hide blend panel for Piper (Kokoro-only feature)
+  $('kokoro-blend-section').classList.toggle('hidden', !isKokoro);
+  if (!isKokoro && $('blend-enable').checked) {
+    $('blend-enable').checked = false;
+    $('blend-panel').classList.add('hidden');
+  }
+
+  if (!isKokoro) checkPiperStatus();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Piper voice population
+// ─────────────────────────────────────────────────────────────────────────────
+function populatePiperVoices() {
+  if (!piperVoiceData) return;
+
+  const langSel = $('piper-language');
+  langSel.innerHTML = '';
+  Object.keys(piperVoiceData).forEach(lang => {
+    const opt = document.createElement('option');
+    opt.value = lang;
+    opt.textContent = lang;
+    langSel.appendChild(opt);
+  });
+
+  langSel.addEventListener('change', updatePiperVoiceDropdown);
+  updatePiperVoiceDropdown();
+}
+
+function updatePiperVoiceDropdown() {
+  if (!piperVoiceData) return;
+  const lang = $('piper-language').value;
+  const voiceSel = $('piper-voice-select');
+  voiceSel.innerHTML = '';
+
+  const voices = piperVoiceData[lang]?.voices || [];
+  voices.forEach(v => {
+    const opt = document.createElement('option');
+    opt.value = v.id;
+    opt.textContent = `${v.name} (${v.gender})`;
+    voiceSel.appendChild(opt);
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Piper model status + download
+// ─────────────────────────────────────────────────────────────────────────────
+async function checkPiperStatus() {
+  try {
+    const s = await window.pywebview.api.get_piper_status();
+    setPiperStatusUI(s.ready);
+  } catch (_) {}
+}
+
+function setPiperStatusUI(ready) {
+  const txt = $('piper-status-text');
+  const btn = $('btn-download-piper');
+  if (ready) {
+    txt.textContent = '✓ Model ready';
+    txt.className = 'piper-status-ready';
+    btn.classList.add('hidden');
+  } else {
+    txt.textContent = '⚠ Model not downloaded';
+    txt.className = 'piper-status-missing';
+    btn.classList.remove('hidden');
+  }
+}
+
+async function handlePiperDownload() {
+  const btn = $('btn-download-piper');
+  btn.disabled = true;
+  setStatus('Starting Piper download…', 'running');
+  showProgress(true);
+
+  try {
+    const resp = await window.pywebview.api.start_piper_download();
+    if (!resp.started) {
+      setStatus('Download failed to start: ' + (resp.error || ''), 'error');
+      showProgress(false);
+      btn.disabled = false;
+      return;
+    }
+  } catch (err) {
+    setStatus('Download error: ' + err, 'error');
+    showProgress(false);
+    btn.disabled = false;
+    return;
+  }
+
+  if (piperDlInterval) clearInterval(piperDlInterval);
+  piperDlInterval = setInterval(async () => {
+    try {
+      const p = await window.pywebview.api.get_piper_download_progress();
+      const pct = Math.round((p.progress || 0) * 100);
+      $('progress-fill').style.width = pct + '%';
+      $('progress-label').textContent = p.status || 'Downloading…';
+
+      if (!p.downloading) {
+        clearInterval(piperDlInterval);
+        piperDlInterval = null;
+        showProgress(false);
+        btn.disabled = false;
+        if (p.done) {
+          setStatus('Piper model downloaded', 'success');
+          setPiperStatusUI(true);
+        } else {
+          setStatus('Download failed: ' + (p.error || 'unknown'), 'error');
+        }
+      }
+    } catch (_) {}
+  }, 400);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -198,6 +340,7 @@ function initControls() {
   // Action buttons
   $('btn-preview').addEventListener('click', handlePreview);
   $('btn-generate').addEventListener('click', handleGenerateOrCancel);
+  $('btn-download-piper').addEventListener('click', handlePiperDownload);
   $('btn-play-last').addEventListener('click', handlePlayLast);
   $('btn-open-folder').addEventListener('click', () => {
     const dir = $('output-dir').value || '';
@@ -401,17 +544,23 @@ function getPostProcessingOptions() {
 }
 
 function buildParams() {
-  return {
-    text:              $('text-input').value,
-    voices:            getVoiceSpecs(),
-    lang_code:         getLangCode(),
-    speed:             parseFloat($('speed-slider').value),
-    split_pattern:     getSplitPattern(),
-    output_format:     $('output-format').value,
-    output_filename:   $('output-filename').value.trim(),
-    output_dir:        $('output-dir').value.trim(),
-    post_processing:   getPostProcessingOptions(),
+  // Shared params for both engines
+  const shared = {
+    engine:          currentEngine,
+    text:            $('text-input').value,
+    speed:           parseFloat($('speed-slider').value),
+    split_pattern:   getSplitPattern(),
+    output_format:   $('output-format').value,
+    output_filename: $('output-filename').value.trim(),
+    output_dir:      $('output-dir').value.trim(),
+    post_processing: getPostProcessingOptions(),
   };
+
+  if (currentEngine === 'piper') {
+    return { ...shared, piper_voice: $('piper-voice-select').value };
+  }
+
+  return { ...shared, voices: getVoiceSpecs(), lang_code: getLangCode() };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -423,26 +572,27 @@ async function handlePreview() {
   const text = $('text-input').value.trim();
   if (!text) { setStatus('No text to preview', 'error'); return; }
 
-  const specs = getVoiceSpecs();
-  if (!specs.length) { setStatus('Select a voice first', 'error'); return; }
+  const speed = parseFloat($('speed-slider').value);
+  let previewParams;
+
+  if (currentEngine === 'piper') {
+    const piperVoice = $('piper-voice-select').value;
+    if (!piperVoice) { setStatus('Select a Piper voice first', 'error'); return; }
+    previewParams = { engine: 'piper', text, piper_voice: piperVoice, speed };
+  } else {
+    const specs = getVoiceSpecs();
+    if (!specs.length) { setStatus('Select a voice first', 'error'); return; }
+    previewParams = { engine: 'kokoro', text, voices: specs, lang_code: getLangCode(), speed };
+  }
 
   isPreviewing = true;
   $('btn-preview').disabled = true;
   setStatus('Generating preview…', 'running');
 
   try {
-    const result = await window.pywebview.api.preview({
-      text,
-      voices:    specs,
-      lang_code: getLangCode(),
-      speed:     parseFloat($('speed-slider').value),
-    });
-
-    if (result.success) {
-      setStatus('Preview complete', 'success');
-    } else {
-      setStatus('Preview error: ' + result.error, 'error');
-    }
+    const result = await window.pywebview.api.preview(previewParams);
+    setStatus(result.success ? 'Preview complete' : 'Preview error: ' + result.error,
+              result.success ? 'success' : 'error');
   } catch (err) {
     setStatus('Preview failed: ' + err, 'error');
   } finally {
@@ -464,8 +614,12 @@ async function handleGenerateOrCancel() {
   const text = $('text-input').value.trim();
   if (!text) { setStatus('No text to generate', 'error'); return; }
 
-  const specs = getVoiceSpecs();
-  if (!specs.length) { setStatus('Select a voice first', 'error'); return; }
+  if (currentEngine === 'piper') {
+    if (!$('piper-voice-select').value) { setStatus('Select a Piper voice first', 'error'); return; }
+  } else {
+    const specs = getVoiceSpecs();
+    if (!specs.length) { setStatus('Select a voice first', 'error'); return; }
+  }
 
   const params = buildParams();
 

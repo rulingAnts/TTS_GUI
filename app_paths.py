@@ -71,6 +71,18 @@ def get_outputs_path() -> Path:
     return path
 
 
+def get_piper_models_path() -> Path:
+    """Where Piper .onnx voice model files are stored."""
+    path = get_models_path() / "piper"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def piper_model_is_ready(voice_id: str = "id_ID-argis-medium") -> bool:
+    """Returns True if the given Piper voice .onnx file exists locally."""
+    return (get_models_path() / "piper" / f"{voice_id}.onnx").exists()
+
+
 def get_espeak_data_path() -> Path:
     """Bundled espeak-ng-data directory (PyInstaller only)."""
     return get_base_path() / "espeak-ng-data"

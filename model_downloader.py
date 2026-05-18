@@ -12,6 +12,11 @@ logger = logging.getLogger(__name__)
 
 REPO_ID = "hexgrad/Kokoro-82M"
 
+PIPER_MODEL_RELEASE_URL = (
+    "https://github.com/rulingAnts/TTS_GUI/releases/download/"
+    "piper-models-v1/piper-id-argis-medium.zip"
+)
+
 _IGNORE_PREFIXES = ("samples/", "eval/")
 _IGNORE_SUFFIXES = (".md", ".txt", ".gitattributes")
 
@@ -61,3 +66,43 @@ def download_model(
             local_dir=str(dest_dir),
         )
         progress_cb((i + 1) / total, filename)
+
+
+def download_piper_model(
+    dest_dir: Path,
+    progress_cb: Callable[[float, str], None],
+    cancel_event: Optional[threading.Event] = None,
+) -> None:
+    """
+    Download the Piper Indonesian model zip from the GitHub release and
+    extract it into dest_dir.
+
+    progress_cb(fraction 0-1, status_string) is called during download.
+    """
+    import io
+    import zipfile
+
+    import requests
+
+    progress_cb(0.0, "Connecting…")
+    resp = requests.get(PIPER_MODEL_RELEASE_URL, stream=True, timeout=30)
+    resp.raise_for_status()
+
+    total = int(resp.headers.get("content-length", 0))
+    downloaded = 0
+    data_chunks = []
+
+    for chunk in resp.iter_content(chunk_size=32768):
+        if cancel_event and cancel_event.is_set():
+            raise RuntimeError("Download cancelled by user")
+        data_chunks.append(chunk)
+        downloaded += len(chunk)
+        if total:
+            progress_cb(downloaded / total * 0.9, "piper-id-argis-medium.zip")
+
+    progress_cb(0.92, "Extracting…")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(b"".join(data_chunks))) as zf:
+        zf.extractall(dest_dir)
+
+    progress_cb(1.0, "Done")

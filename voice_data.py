@@ -96,6 +96,15 @@ VOICE_DATA = {
 }
 
 
+PIPER_VOICE_DATA = {
+    "Indonesian": {
+        "voices": [
+            {"id": "id_ID-argis-medium", "name": "Argis", "gender": "male"},
+        ]
+    },
+}
+
+
 def get_all_voice_ids() -> Set[str]:
     ids: Set[str] = set()
     for lang_data in VOICE_DATA.values():
