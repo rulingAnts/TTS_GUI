@@ -14,6 +14,9 @@ let hasV3 = false;
 let lastOutputPath = null;
 let currentEngine = 'kokoro';
 let currentMode = 'voice';      // 'voice' | 'podcast'
+let xttsData = { ready: false, speakers: [], languages: [] };
+let xttsVoiceMode = 'builtin';  // 'builtin' | 'sample'
+let xttsSamplePath = '';
 let parsedScript = null;        // result from api.parse_script()
 let speakerCardEls = {};        // { speakerName: { voiceEl, speedEl } }
 
@@ -38,6 +41,7 @@ function appInit() {
   initVoiceBlending();
   initPostProcessing();
   initEngineTabs();
+  initXttsControls();
   initModeSwitcher();
   loadVoiceData();
   loadDefaultOutputDir();
@@ -69,6 +73,7 @@ async function loadVoiceData() {
     cascadeAccent(VOICE_SLOTS[0]);
     populatePiperVoices();
     checkPiperStatus();
+    checkXttsStatus();
     setStatus('Ready', 'idle');
   } catch (err) {
     setStatus('Failed to load voice data: ' + err, 'error');
@@ -94,25 +99,27 @@ function initEngineTabs() {
 function switchEngine(engine) {
   currentEngine = engine;
 
-  // Update tab active states
-  $$('.engine-tab').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.engine === engine);
-  });
+  $$('.engine-tab').forEach(btn =>
+    btn.classList.toggle('active', btn.dataset.engine === engine)
+  );
 
   const isKokoro = engine === 'kokoro';
+  const isXtts   = engine === 'xtts';
+  const isPiper  = engine === 'piper';
 
-  // Swap voice panels
   $('kokoro-fields').classList.toggle('hidden', !isKokoro);
-  $('piper-fields').classList.toggle('hidden', isKokoro);
+  $('xtts-fields').classList.toggle('hidden',   !isXtts);
+  $('piper-fields').classList.toggle('hidden',   !isPiper);
 
-  // Hide blend panel for Piper (Kokoro-only feature)
+  // Voice blending is Kokoro-only
   $('kokoro-blend-section').classList.toggle('hidden', !isKokoro);
   if (!isKokoro && $('blend-enable').checked) {
     $('blend-enable').checked = false;
     $('blend-panel').classList.add('hidden');
   }
 
-  if (!isKokoro) checkPiperStatus();
+  if (isPiper) checkPiperStatus();
+  if (isXtts)  checkXttsStatus();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -216,6 +223,151 @@ async function handlePiperDownload() {
       }
     } catch (_) {}
   }, 400);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// XTTS v2 status + load
+// ─────────────────────────────────────────────────────────────────────────────
+async function checkXttsStatus() {
+  try {
+    const s = await window.pywebview.api.get_xtts_status();
+    xttsData = s;
+    applyXttsStatusUI(s);
+  } catch (_) {}
+}
+
+function applyXttsStatusUI(s) {
+  const txt = $('xtts-status-text');
+  const btn = $('btn-load-xtts');
+  const controls = $('xtts-controls');
+
+  if (s.ready) {
+    txt.textContent = '✓ XTTS v2 ready';
+    txt.className = 'piper-status-ready';
+    btn.classList.add('hidden');
+    controls.classList.remove('hidden');
+    populateXttsLanguages(s.languages);
+    populateXttsSpeakers(s.speakers);
+  } else if (s.loading) {
+    txt.textContent = '⏳ Loading model…';
+    txt.className = 'piper-status-checking';
+    btn.classList.add('hidden');
+    controls.classList.add('hidden');
+    setTimeout(checkXttsStatus, 2000);
+  } else if (s.error) {
+    txt.textContent = '✗ Error: ' + s.error;
+    txt.className = 'piper-status-missing';
+    btn.textContent = '↺ Retry';
+    btn.classList.remove('hidden');
+    controls.classList.add('hidden');
+  } else if (s.model_on_disk) {
+    txt.textContent = 'Model on disk — click to load';
+    txt.className = 'piper-status-missing';
+    btn.textContent = '▶ Load XTTS v2';
+    btn.classList.remove('hidden');
+    controls.classList.add('hidden');
+  } else {
+    txt.textContent = '⚠ Not downloaded (~1.8 GB)';
+    txt.className = 'piper-status-missing';
+    btn.textContent = '⬇ Download & Load';
+    btn.classList.remove('hidden');
+    controls.classList.add('hidden');
+  }
+}
+
+function populateXttsLanguages(languages) {
+  const sel = $('xtts-language');
+  sel.innerHTML = '';
+  (languages || []).forEach(({ name, code }) => {
+    const opt = document.createElement('option');
+    opt.value = code;
+    opt.textContent = name;
+    if (code === 'en') opt.selected = true;
+    sel.appendChild(opt);
+  });
+  // Also populate podcast speaker card XTTS language dropdowns
+  $$('.spk-xtts-lang').forEach(el => {
+    el.innerHTML = sel.innerHTML;
+  });
+}
+
+function populateXttsSpeakers(speakers) {
+  const sel = $('xtts-speaker');
+  sel.innerHTML = '';
+  (speakers || []).forEach(name => {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  });
+  // Also populate podcast speaker card XTTS speaker dropdowns
+  $$('.spk-xtts-speaker').forEach(el => {
+    el.innerHTML = sel.innerHTML;
+  });
+}
+
+async function handleLoadXtts() {
+  $('btn-load-xtts').disabled = true;
+  setStatus('Loading XTTS v2 (this may take a while on first run)…', 'running');
+  try {
+    await window.pywebview.api.start_xtts_load();
+    setTimeout(checkXttsStatus, 1000);
+  } catch (err) {
+    setStatus('XTTS load failed: ' + err, 'error');
+    $('btn-load-xtts').disabled = false;
+  }
+}
+
+function initXttsControls() {
+  $('btn-load-xtts').addEventListener('click', handleLoadXtts);
+
+  // Voice mode radio toggle
+  $$('input[name="xtts-voice-mode"]').forEach(r => {
+    r.addEventListener('change', e => {
+      xttsVoiceMode = e.target.value;
+      $('xtts-builtin-panel').classList.toggle('hidden', xttsVoiceMode !== 'builtin');
+      $('xtts-sample-panel').classList.toggle('hidden',  xttsVoiceMode !== 'sample');
+    });
+  });
+
+  // Browse voice sample
+  $('btn-browse-voice-sample').addEventListener('click', async () => {
+    const path = await window.pywebview.api.browse_voice_sample();
+    if (path) { xttsSamplePath = path; $('xtts-sample-path').value = path; }
+  });
+
+  // Test buttons
+  $('btn-test-xtts').addEventListener('click', () => {
+    testXttsVoice($('xtts-language').value, '', $('xtts-speaker').value);
+  });
+  $('btn-test-xtts-sample').addEventListener('click', () => {
+    testXttsVoice($('xtts-language').value, xttsSamplePath, '');
+  });
+}
+
+async function testXttsVoice(language, speakerWav, speaker) {
+  if (isPreviewing || isGenerating) return;
+  isPreviewing = true;
+  setAllTestButtons(true);
+  setStatus(`Testing XTTS voice…`, 'running');
+  try {
+    const r = await window.pywebview.api.test_xtts_voice(language, speakerWav || '', speaker || '');
+    setStatus(r.success ? 'Ready' : 'Test error: ' + r.error, r.success ? 'idle' : 'error');
+  } catch (err) {
+    setStatus('Test failed: ' + err, 'error');
+  } finally {
+    isPreviewing = false;
+    setAllTestButtons(false);
+  }
+}
+
+function getXttsParams() {
+  return {
+    engine:           'xtts',
+    xtts_language:    $('xtts-language').value,
+    xtts_speaker:     xttsVoiceMode === 'builtin' ? $('xtts-speaker').value : '',
+    xtts_speaker_wav: xttsVoiceMode === 'sample'  ? xttsSamplePath : '',
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -566,7 +718,9 @@ function buildParams() {
   if (currentEngine === 'piper') {
     return { ...shared, piper_voice: $('piper-voice-select').value };
   }
-
+  if (currentEngine === 'xtts') {
+    return { ...shared, ...getXttsParams() };
+  }
   return { ...shared, voices: getVoiceSpecs(), lang_code: getLangCode() };
 }
 
@@ -901,37 +1055,103 @@ function buildSpeakerCard(speaker, defaultVoice, lineCount, allVoices) {
     return `<optgroup label="${lang}">${opts}</optgroup>`;
   }).join('');
 
+  // Build XTTS language options from loaded data
+  const xttsLangOpts = xttsData.languages.map(({ name, code }) =>
+    `<option value="${code}"${code === 'en' ? ' selected' : ''}>${name}</option>`
+  ).join('');
+  const xttsSpeakerOpts = xttsData.speakers.map(s =>
+    `<option value="${s}">${s}</option>`
+  ).join('');
+
   card.innerHTML = `
     <div class="speaker-card-header">
       <span class="speaker-name">${speaker}</span>
       <span class="speaker-line-count">${lineCount} line${lineCount !== 1 ? 's' : ''}</span>
     </div>
-    <div class="form-row">
-      <label>Voice</label>
-      <select class="select spk-voice">${optionsHtml}</select>
-      <button class="btn btn-ghost btn-small btn-test-voice spk-test-btn"
-              title="Play sample sentence in this voice">▶</button>
+
+    <div class="speaker-engine-toggle">
+      <button class="engine-mini-btn active" data-engine="kokoro">Kokoro</button>
+      <button class="engine-mini-btn"        data-engine="xtts">XTTS v2</button>
     </div>
-    <div class="form-row">
-      <label>Speed</label>
-      <div class="slider-with-value">
-        <input type="range" class="slider spk-speed" min="0.5" max="2.0" step="0.05" value="1.0">
-        <span class="slider-value spk-speed-val">1.00×</span>
+
+    <!-- Kokoro controls -->
+    <div class="spk-kokoro-controls">
+      <div class="form-row">
+        <label>Voice</label>
+        <select class="select spk-voice">${optionsHtml}</select>
+        <button class="btn btn-ghost btn-small btn-test-voice spk-test-btn"
+                title="Test this voice">▶</button>
+      </div>
+      <div class="form-row">
+        <label>Speed</label>
+        <div class="slider-with-value">
+          <input type="range" class="slider spk-speed" min="0.5" max="2.0" step="0.05" value="1.0">
+          <span class="slider-value spk-speed-val">1.00×</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- XTTS controls -->
+    <div class="spk-xtts-controls hidden">
+      <div class="form-row">
+        <label>Language</label>
+        <select class="select spk-xtts-lang">${xttsLangOpts || '<option value="en">English</option>'}</select>
+      </div>
+      <div class="form-row">
+        <label>Speaker</label>
+        <select class="select spk-xtts-speaker">${xttsSpeakerOpts || '<option value="">Load model first</option>'}</select>
+        <button class="btn btn-ghost btn-small btn-test-voice spk-test-xtts-btn"
+                title="Test XTTS voice">▶</button>
+      </div>
+      <div class="form-row">
+        <label>Or sample</label>
+        <div class="path-input-group">
+          <input type="text" class="text-input spk-xtts-wav" placeholder="Optional .wav file" readonly>
+          <button class="btn btn-secondary btn-small spk-browse-wav">Browse</button>
+        </div>
       </div>
     </div>
   `;
 
-  const speedEl = card.querySelector('.spk-speed');
+  // Speed slider
+  const speedEl  = card.querySelector('.spk-speed');
   const speedVal = card.querySelector('.spk-speed-val');
   speedEl.addEventListener('input', () => {
     speedVal.textContent = parseFloat(speedEl.value).toFixed(2) + '×';
   });
 
+  // Kokoro test button
   card.querySelector('.spk-test-btn').addEventListener('click', () => {
     testVoice(card.querySelector('.spk-voice').value);
   });
 
+  // XTTS test button
+  card.querySelector('.spk-test-xtts-btn').addEventListener('click', () => {
+    const lang = card.querySelector('.spk-xtts-lang').value;
+    const spk  = card.querySelector('.spk-xtts-speaker').value;
+    const wav  = card.querySelector('.spk-xtts-wav').value;
+    testXttsVoice(lang, wav, spk);
+  });
+
+  // XTTS browse voice sample
+  card.querySelector('.spk-browse-wav').addEventListener('click', async () => {
+    const path = await window.pywebview.api.browse_voice_sample();
+    if (path) card.querySelector('.spk-xtts-wav').value = path;
+  });
+
+  // Engine mini-toggle
+  card.querySelectorAll('.engine-mini-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      card.querySelectorAll('.engine-mini-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const isXtts = btn.dataset.engine === 'xtts';
+      card.querySelector('.spk-kokoro-controls').classList.toggle('hidden',  isXtts);
+      card.querySelector('.spk-xtts-controls').classList.toggle('hidden', !isXtts);
+    });
+  });
+
   speakerCardEls[speaker] = {
+    card,
     voiceEl: card.querySelector('.spk-voice'),
     speedEl,
   };
@@ -942,14 +1162,28 @@ function buildSpeakerCard(speaker, defaultVoice, lineCount, allVoices) {
 function collectSpeakerVoices() {
   const result = {};
   for (const [speaker, els] of Object.entries(speakerCardEls)) {
-    const voiceId = els.voiceEl.value;
-    const selected = els.voiceEl.selectedOptions[0];
-    const langCode = selected?.dataset.lang || 'a';
-    result[speaker] = {
-      voice_id: voiceId,
-      lang_code: langCode,
-      speed: parseFloat(els.speedEl.value),
-    };
+    const card = els.card;
+    const activeEngineBtn = card.querySelector('.engine-mini-btn.active');
+    const engine = activeEngineBtn ? activeEngineBtn.dataset.engine : 'kokoro';
+
+    if (engine === 'xtts') {
+      result[speaker] = {
+        engine:          'xtts',
+        xtts_language:   card.querySelector('.spk-xtts-lang').value,
+        xtts_speaker:    card.querySelector('.spk-xtts-speaker').value,
+        xtts_speaker_wav: card.querySelector('.spk-xtts-wav').value || '',
+        speed:           parseFloat(els.speedEl.value),
+      };
+    } else {
+      const voiceId = els.voiceEl.value;
+      const selected = els.voiceEl.selectedOptions[0];
+      result[speaker] = {
+        engine:   'kokoro',
+        voice_id: voiceId,
+        lang_code: selected?.dataset.lang || 'a',
+        speed:    parseFloat(els.speedEl.value),
+      };
+    }
   }
   return result;
 }

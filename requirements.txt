@@ -1,5 +1,6 @@
 kokoro>=0.9.4
 piper-tts
+TTS>=0.22.0    # Coqui XTTS v2
 soundfile
 numpy
 pywebview>=5.0

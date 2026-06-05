@@ -99,6 +99,7 @@
               <label>Engine</label>
               <div class="engine-tabs">
                 <button class="engine-tab active" id="engine-tab-kokoro" data-engine="kokoro">Kokoro</button>
+                <button class="engine-tab"        id="engine-tab-xtts"   data-engine="xtts">XTTS v2</button>
                 <button class="engine-tab"        id="engine-tab-piper"  data-engine="piper">Piper</button>
               </div>
             </div>
@@ -126,6 +127,55 @@
                 <select id="v1-voice" class="select"></select>
                 <button id="btn-test-v1" class="btn btn-ghost btn-small btn-test-voice"
                         title="Play sample sentence in this voice">▶</button>
+              </div>
+            </div>
+
+            <!-- XTTS v2 fields (hidden until XTTS engine selected) -->
+            <div id="xtts-fields" class="hidden">
+              <div class="xtts-status-bar" id="xtts-status-bar">
+                <span id="xtts-status-text" class="piper-status-checking">Checking…</span>
+                <button id="btn-load-xtts" class="btn btn-primary btn-small hidden">
+                  ⬇ Download &amp; Load (~1.8 GB)
+                </button>
+              </div>
+
+              <div id="xtts-controls" class="hidden">
+                <div class="form-row">
+                  <label for="xtts-language">Language</label>
+                  <select id="xtts-language" class="select"></select>
+                </div>
+
+                <div class="form-row" style="align-items:flex-start">
+                  <label style="padding-top:3px">Voice</label>
+                  <div style="flex:1">
+                    <div class="radio-group" style="margin-bottom:6px">
+                      <label class="radio-label">
+                        <input type="radio" name="xtts-voice-mode" value="builtin" checked> Built-in speaker
+                      </label>
+                      <label class="radio-label">
+                        <input type="radio" name="xtts-voice-mode" value="sample"> Voice sample file
+                      </label>
+                    </div>
+
+                    <div id="xtts-builtin-panel">
+                      <div class="path-input-group">
+                        <select id="xtts-speaker" class="select"></select>
+                        <button id="btn-test-xtts" class="btn btn-ghost btn-small btn-test-voice"
+                                title="Test this voice">▶</button>
+                      </div>
+                    </div>
+
+                    <div id="xtts-sample-panel" class="hidden">
+                      <div class="path-input-group">
+                        <input type="text" id="xtts-sample-path" class="text-input"
+                               placeholder="Choose a .wav or .mp3 file…" readonly>
+                        <button id="btn-browse-voice-sample" class="btn btn-secondary btn-small">Browse</button>
+                        <button id="btn-test-xtts-sample" class="btn btn-ghost btn-small btn-test-voice"
+                                title="Test cloned voice">▶</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 

@@ -28,8 +28,10 @@ import webview
 
 # ── Step 3: app modules (may import torch/kokoro internally) ──────────────
 from tts_engine import TTSEngine
+from xtts_engine import XTTSEngine, LANGUAGES as XTTS_LANGUAGES, is_model_ready as xtts_model_is_ready
 from piper_engine import PiperEngine
 from voice_data import VOICE_DATA, PIPER_VOICE_DATA, validate_voice_data
+from audio_player import play_wav as _play_wav
 from app_paths import (
     get_frontend_path,
     get_setup_frontend_path,
@@ -42,40 +44,6 @@ from app_paths import (
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
-
-
-def _play_wav(path: str) -> None:
-    """
-    Play a WAV file using the best available method for the current platform.
-
-    macOS  : afplay  (built-in, works from any thread)
-    Windows: winsound (built-in Python module)
-    Linux  : aplay → paplay → ffplay in order; falls back to sounddevice
-    Any    : sounddevice as last resort
-    """
-    if sys.platform == "darwin":
-        subprocess.run(["afplay", path], check=True)
-        return
-
-    if sys.platform == "win32":
-        import winsound
-        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)
-        return
-
-    # Linux / other — try common CLI players
-    for cmd in [["aplay", path], ["paplay", path], ["ffplay", "-nodisp", "-autoexit", path]]:
-        try:
-            subprocess.run(cmd, check=True, capture_output=True)
-            return
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            continue
-
-    # Universal fallback
-    import soundfile as sf
-    import sounddevice as sd
-    data, sr = sf.read(path, dtype="float32")
-    sd.play(data, sr)
-    sd.wait()
 
 
 def _check_espeak() -> bool:
@@ -102,7 +70,8 @@ def _espeak_install_hint() -> str:
 class Api:
     def __init__(self):
         self.window = None
-        self._engine = TTSEngine()
+        self._engine       = TTSEngine()
+        self._xtts_engine  = XTTSEngine()
         self._piper_engine = PiperEngine()
         self._voice_data, self._unavailable = validate_voice_data()
         self._running = False
@@ -119,6 +88,8 @@ class Api:
         self._piper_dl_done = False
         self._piper_dl_error: str | None = None
         self._piper_dl_cancel = threading.Event()
+        # XTTS load state
+        self._xtts_loading = False
 
     def get_voice_data(self) -> dict:
         try:
@@ -176,10 +147,9 @@ class Api:
                 self._progress = current / total if total > 0 else 0.0
 
             if engine == "piper":
-                piper_voice = params.get("piper_voice", "id_ID-argis-medium")
                 result_path = self._piper_engine.generate_audio(
                     text=text,
-                    voice_id=piper_voice,
+                    voice_id=params.get("piper_voice", "id_ID-argis-medium"),
                     speed=speed,
                     split_pattern=split_pat,
                     post_proc_options=post_proc,
@@ -188,13 +158,24 @@ class Api:
                     progress_callback=progress_cb,
                     cancel_flag=self._cancel_flag,
                 )
-            else:
-                voice_specs = params.get("voices", [{"voice_id": "af_heart", "weight": 100}])
-                lang_code   = params.get("lang_code", "a")
+            elif engine == "xtts":
+                result_path = self._xtts_engine.generate_audio(
+                    text=text,
+                    language=params.get("xtts_language", "en"),
+                    speaker_wav=params.get("xtts_speaker_wav") or None,
+                    speaker=params.get("xtts_speaker") or None,
+                    split_pattern=split_pat,
+                    post_proc_options=post_proc,
+                    output_path=output_path,
+                    output_format=out_fmt,
+                    progress_callback=progress_cb,
+                    cancel_flag=self._cancel_flag,
+                )
+            else:  # kokoro (default)
                 result_path = self._engine.generate_audio(
                     text=text,
-                    voice_specs=voice_specs,
-                    lang_code=lang_code,
+                    voice_specs=params.get("voices", [{"voice_id": "af_heart", "weight": 100}]),
+                    lang_code=params.get("lang_code", "a"),
                     speed=speed,
                     split_pattern=split_pat,
                     post_proc_options=post_proc,
@@ -242,6 +223,13 @@ class Api:
                     text=text,
                     voice_id=params.get("piper_voice", "id_ID-argis-medium"),
                     speed=speed,
+                )
+            elif engine == "xtts":
+                self._xtts_engine.preview_audio(
+                    text=text,
+                    language=params.get("xtts_language", "en"),
+                    speaker_wav=params.get("xtts_speaker_wav") or None,
+                    speaker=params.get("xtts_speaker") or None,
                 )
             else:
                 self._engine.preview_audio(
@@ -427,24 +415,31 @@ class Api:
             return {"started": False, "error": str(exc)}
 
     def _generate_podcast_thread(self, params: dict) -> None:
-        try:
-            from script_parser import parse_script
+        """
+        Multi-engine podcast generation.  Each speaker can independently use
+        Kokoro (engine='kokoro') or XTTS v2 (engine='xtts').
+        """
+        import numpy as np
+        import soundfile as sf
+        from script_parser import parse_script
+        from audio_processing import post_process
+        from tts_engine import _parse_pause_segments, _expand_to_items
 
+        try:
             text = params.get("text", "").strip()
             if not text:
                 self._last_result = {"success": False, "error": "No script text"}
                 return
 
-            speaker_voices  = params.get("speaker_voices", {})
-            post_proc       = params.get("post_processing", {"normalize": True})
-            out_fmt         = params.get("output_format", "wav").lower()
-            out_dir         = params.get("output_dir") or str(get_outputs_path())
-            out_name        = (params.get("output_filename") or "").strip()
-            between_ms      = int(params.get("between_speakers_ms", 500))
+            speaker_voices = params.get("speaker_voices", {})
+            post_proc      = params.get("post_processing", {"normalize": True})
+            out_fmt        = params.get("output_format", "wav").lower()
+            out_dir        = params.get("output_dir") or str(get_outputs_path())
+            out_name       = (params.get("output_filename") or "").strip()
+            between_ms     = int(params.get("between_speakers_ms", 500))
 
             if not out_name:
                 out_name = f"podcast_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
             ext = out_fmt if out_fmt in ("wav", "flac", "mp3") else "wav"
             output_path = str(Path(out_dir) / f"{out_name}.{ext}")
             Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -454,35 +449,93 @@ class Api:
                 self._last_result = {"success": False, "error": parsed.error}
                 return
 
-            lines = [{"speaker": l.speaker, "text": l.text} for l in parsed.lines]
+            lines      = parsed.lines
+            total      = len(lines)
+            SR         = 24000
+            gap_change = np.zeros(int(SR * between_ms / 1000), dtype=np.float32)
+            gap_same   = np.zeros(int(SR * 150 / 1000),        dtype=np.float32)
 
-            def progress_cb(current: int, total: int) -> None:
-                self._current_chunk = current
+            all_audio: list[np.ndarray] = []
+            prev_speaker: str | None = None
+
+            for i, line in enumerate(lines):
+                if self._cancel_flag.is_set():
+                    break
+
+                speaker = line.speaker
+                text    = line.text.strip()
+                cfg     = speaker_voices.get(speaker, {})
+                engine  = cfg.get("engine", "kokoro")
+                speed   = float(cfg.get("speed", 1.0))
+
+                # Silence gap between turns
+                if prev_speaker is not None:
+                    all_audio.append(
+                        gap_change.copy() if speaker != prev_speaker else gap_same.copy()
+                    )
+
+                # Expand (...) pause markers
+                pause_segs = _parse_pause_segments(text)
+                items      = _expand_to_items(pause_segs, "")
+
+                if engine == "xtts":
+                    xtts_lang   = cfg.get("xtts_language", "en")
+                    spk_wav     = cfg.get("xtts_speaker_wav") or None
+                    spk_name    = cfg.get("xtts_speaker") or None
+                    for item_type, item_val in items:
+                        if self._cancel_flag.is_set(): break
+                        if item_type == "silence":
+                            all_audio.append(np.zeros(item_val, dtype=np.float32))
+                        else:
+                            try:
+                                wav = self._xtts_engine.synthesize(
+                                    item_val, xtts_lang, spk_wav, spk_name
+                                )
+                                all_audio.append(wav)
+                            except Exception as exc:
+                                logger.error("XTTS line %d (%s): %s", i+1, speaker, exc)
+
+                else:  # kokoro (default)
+                    voice_id  = cfg.get("voice_id", "af_heart")
+                    lang_code = cfg.get("lang_code", "a")
+                    voice     = self._engine._resolve_voice(voice_id)
+                    pipeline  = self._engine._get_pipeline(lang_code)
+                    for item_type, item_val in items:
+                        if self._cancel_flag.is_set(): break
+                        if item_type == "silence":
+                            all_audio.append(np.zeros(item_val, dtype=np.float32))
+                        else:
+                            try:
+                                parts = self._engine._synthesise_chunk(
+                                    pipeline, item_val, voice, speed
+                                )
+                                all_audio.extend(parts)
+                            except Exception as exc:
+                                logger.error("Kokoro line %d (%s): %s", i+1, speaker, exc)
+
+                prev_speaker = speaker
+                self._current_chunk = i + 1
                 self._total_chunks  = total
-                self._progress = current / total if total > 0 else 0.0
+                self._progress      = (i + 1) / total
 
-            result_path = self._engine.generate_podcast(
-                lines=lines,
-                speaker_voices=speaker_voices,
-                post_proc_options=post_proc,
-                output_path=output_path,
-                output_format=out_fmt,
-                progress_callback=progress_cb,
-                cancel_flag=self._cancel_flag,
-                between_speakers_ms=between_ms,
-            )
+            if not all_audio:
+                self._last_result = {"success": False, "error": "No audio generated"}
+                return
 
-            self._last_output_path = result_path
+            combined = np.concatenate(all_audio)
+            combined = post_process(combined, SR, post_proc)
+            sf.write(output_path, combined, SR)
+
+            self._last_output_path = output_path
             duration = 0.0
             try:
-                import soundfile as sf
-                duration = sf.info(result_path).duration
+                duration = sf.info(output_path).duration
             except Exception:
                 pass
 
             self._last_result = {
                 "success": True,
-                "output_path": result_path,
+                "output_path": output_path,
                 "duration_seconds": duration,
                 "error": None,
             }
@@ -492,6 +545,78 @@ class Api:
         finally:
             self._running = False
             self._progress = 1.0
+
+    # ------------------------------------------------------------------
+    # XTTS v2
+    # ------------------------------------------------------------------
+
+    def get_xtts_status(self) -> dict:
+        """Return XTTS readiness, current speakers, and supported languages."""
+        return {
+            "ready":     self._xtts_engine.is_loaded,
+            "loading":   self._xtts_engine._loading,
+            "error":     self._xtts_engine.load_error,
+            "model_on_disk": xtts_model_is_ready(),
+            "speakers":  self._xtts_engine.speakers,
+            "languages": [{"name": k, "code": v} for k, v in XTTS_LANGUAGES.items()],
+        }
+
+    def start_xtts_load(self) -> dict:
+        """Begin loading (and downloading if needed) the XTTS v2 model."""
+        if self._xtts_engine.is_loaded:
+            return {"started": False, "already_ready": True}
+        if self._xtts_engine._loading:
+            return {"started": False, "already_loading": True}
+        self._xtts_engine.start_load_async()
+        return {"started": True}
+
+    def browse_voice_sample(self) -> str:
+        """Open a file picker for voice sample audio files (.wav / .mp3)."""
+        try:
+            dialog = getattr(webview, "FileDialog", None)
+            mode = dialog.OPEN if dialog else webview.OPEN_DIALOG  # type: ignore
+            result = self.window.create_file_dialog(
+                mode,
+                allow_multiple=False,
+                file_types=("Audio Files (*.wav *.mp3 *.flac)", "All Files (*.*)"),
+            )
+            return result[0] if result else ""
+        except Exception as exc:
+            logger.error("browse_voice_sample: %s", exc)
+            return ""
+
+    def test_xtts_voice(self, language: str, speaker_wav: str, speaker: str) -> dict:
+        """Play a sample sentence with the selected XTTS voice."""
+        _SAMPLE = "Hello! This is the selected voice. How does it sound to you?"
+        tmp_path = None
+        try:
+            if self._running:
+                return {"success": False, "error": "Generation in progress"}
+            import numpy as np
+            import soundfile as sf
+            import tempfile
+
+            wav = self._xtts_engine.synthesize(
+                _SAMPLE,
+                language   = language or "en",
+                speaker_wav = speaker_wav or None,
+                speaker    = speaker or None,
+            )
+            if not np.any(wav != 0):
+                return {"success": False, "error": "Silent output from XTTS"}
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                tmp_path = f.name
+            sf.write(tmp_path, wav, 24000)
+            _play_wav(tmp_path)
+            return {"success": True, "error": None}
+        except Exception as exc:
+            logger.error("test_xtts_voice: %s", exc, exc_info=True)
+            return {"success": False, "error": str(exc)}
+        finally:
+            if tmp_path:
+                try: os.unlink(tmp_path)
+                except OSError: pass
 
     def get_piper_status(self) -> dict:
         return {"ready": piper_model_is_ready()}
