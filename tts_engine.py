@@ -182,12 +182,27 @@ def blend_voices(voice_specs: List[dict]):
 # ---------------------------------------------------------------------------
 
 def _best_device() -> str:
-    """Return the fastest available PyTorch device on this machine."""
-    import torch
-    if torch.backends.mps.is_available():
-        return "mps"        # Apple Silicon GPU
+    """
+    Return the best PyTorch device that Kokoro is known to work on.
+
+    MPS (Apple Silicon GPU) is intentionally skipped: Kokoro's model uses
+    ops (e.g. split_with_sizes) that are not yet fully supported on MPS,
+    causing RuntimeErrors during inference.  CPU on M-series Macs is fast
+    enough and completely reliable.  Revisit once Kokoro adds MPS support.
+
+    To override, set the TTS_DEVICE environment variable:
+        TTS_DEVICE=mps python3 main.py   # try MPS at your own risk
+        TTS_DEVICE=cuda python3 main.py  # Nvidia GPU
+    """
+    import os, torch
+
+    override = os.environ.get("TTS_DEVICE", "").strip().lower()
+    if override:
+        logger.info("TTS_DEVICE override: %s", override)
+        return override
+
     if torch.cuda.is_available():
-        return "cuda"       # Nvidia GPU
+        return "cuda"
     return "cpu"
 
 
