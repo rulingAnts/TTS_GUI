@@ -286,6 +286,119 @@ class Api:
     def get_default_output_dir(self) -> str:
         return str(get_outputs_path())
 
+    # ------------------------------------------------------------------
+    # Podcast / multi-speaker
+    # ------------------------------------------------------------------
+
+    def parse_script(self, text: str) -> dict:
+        """Parse a stage-play script; return speakers and line count."""
+        try:
+            from script_parser import parse_script
+            result = parse_script(text)
+            if result.error:
+                return {"success": False, "error": result.error}
+            return {
+                "success": True,
+                "speakers": result.speakers,
+                "line_count": len(result.lines),
+                "speaker_line_counts": result.speaker_line_counts,
+                # First 5 lines as a preview for the status bar
+                "preview": [
+                    {"speaker": l.speaker, "text": l.text[:80]}
+                    for l in result.lines[:5]
+                ],
+            }
+        except Exception as exc:
+            logger.error("parse_script: %s", exc)
+            return {"success": False, "error": str(exc)}
+
+    def generate_podcast(self, params: dict) -> dict:
+        """Start multi-speaker podcast generation in a background thread."""
+        try:
+            if self._running:
+                return {"started": False, "error": "Generation already in progress"}
+            self._cancel_flag.clear()
+            self._running = True
+            self._progress = 0.0
+            self._current_chunk = 0
+            self._total_chunks = 0
+            self._last_result = None
+            threading.Thread(
+                target=self._generate_podcast_thread, args=(params,), daemon=True
+            ).start()
+            return {"started": True}
+        except Exception as exc:
+            logger.error("generate_podcast: %s", exc)
+            self._running = False
+            return {"started": False, "error": str(exc)}
+
+    def _generate_podcast_thread(self, params: dict) -> None:
+        try:
+            from script_parser import parse_script
+
+            text = params.get("text", "").strip()
+            if not text:
+                self._last_result = {"success": False, "error": "No script text"}
+                return
+
+            speaker_voices  = params.get("speaker_voices", {})
+            post_proc       = params.get("post_processing", {"normalize": True})
+            out_fmt         = params.get("output_format", "wav").lower()
+            out_dir         = params.get("output_dir") or str(get_outputs_path())
+            out_name        = (params.get("output_filename") or "").strip()
+            between_ms      = int(params.get("between_speakers_ms", 500))
+
+            if not out_name:
+                out_name = f"podcast_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+            ext = out_fmt if out_fmt in ("wav", "flac", "mp3") else "wav"
+            output_path = str(Path(out_dir) / f"{out_name}.{ext}")
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+            parsed = parse_script(text)
+            if parsed.error:
+                self._last_result = {"success": False, "error": parsed.error}
+                return
+
+            lines = [{"speaker": l.speaker, "text": l.text} for l in parsed.lines]
+
+            def progress_cb(current: int, total: int) -> None:
+                self._current_chunk = current
+                self._total_chunks  = total
+                self._progress = current / total if total > 0 else 0.0
+
+            result_path = self._engine.generate_podcast(
+                lines=lines,
+                speaker_voices=speaker_voices,
+                post_proc_options=post_proc,
+                output_path=output_path,
+                output_format=out_fmt,
+                progress_callback=progress_cb,
+                cancel_flag=self._cancel_flag,
+                between_speakers_ms=between_ms,
+            )
+
+            self._last_output_path = result_path
+            duration = 0.0
+            try:
+                import soundfile as sf
+                duration = sf.info(result_path).duration
+            except Exception:
+                pass
+
+            self._last_result = {
+                "success": True,
+                "output_path": result_path,
+                "duration_seconds": duration,
+                "error": None,
+            }
+        except Exception as exc:
+            logger.error("_generate_podcast_thread: %s", exc, exc_info=True)
+            self._last_result = {"success": False, "error": str(exc)}
+        finally:
+            self._running = False
+            self._progress = 1.0
+
     def get_piper_status(self) -> dict:
         return {"ready": piper_model_is_ready()}
 

@@ -319,6 +319,89 @@ class TTSEngine:
         sd.wait()
 
     # ------------------------------------------------------------------
+    # Public: podcast (multi-speaker script) generation
+    # ------------------------------------------------------------------
+
+    def generate_podcast(
+        self,
+        lines: List[dict],
+        speaker_voices: dict,
+        post_proc_options: dict,
+        output_path: str,
+        output_format: str,
+        progress_callback: Callable[[int, int], None],
+        cancel_flag: threading.Event,
+        between_speakers_ms: int = 500,
+        between_same_ms: int = 150,
+    ) -> str:
+        """
+        Generate multi-speaker audio from a list of parsed script lines.
+
+        lines:          [{"speaker": "Seth", "text": "Hello..."}, ...]
+        speaker_voices: {"Seth": {"voice_id": "am_echo", "lang_code": "a", "speed": 1.0}, ...}
+        between_speakers_ms: silence when the speaker changes
+        between_same_ms:     silence between consecutive lines from the same speaker
+        """
+        from audio_processing import post_process
+
+        if not lines:
+            raise ValueError("No lines to generate")
+
+        gap_change = np.zeros(int(SAMPLE_RATE * between_speakers_ms / 1000), dtype=np.float32)
+        gap_same   = np.zeros(int(SAMPLE_RATE * between_same_ms   / 1000), dtype=np.float32)
+
+        all_audio: List[np.ndarray] = []
+        prev_speaker: str | None = None
+        total = len(lines)
+
+        for i, line in enumerate(lines):
+            if cancel_flag.is_set():
+                logger.info("Podcast generation cancelled at line %d/%d", i + 1, total)
+                break
+
+            speaker  = line["speaker"]
+            text     = line["text"].strip()
+            cfg      = speaker_voices.get(speaker, {})
+            voice_id = cfg.get("voice_id", "af_heart")
+            lang     = cfg.get("lang_code", "a")
+            speed    = float(cfg.get("speed", 1.0))
+
+            # Gap between turns
+            if prev_speaker is not None:
+                all_audio.append(
+                    gap_change.copy() if speaker != prev_speaker else gap_same.copy()
+                )
+
+            # Expand any (...) pause markers within this line
+            pause_segs = _parse_pause_segments(text)
+            items = _expand_to_items(pause_segs, split_pattern="")
+
+            pipeline = self._get_pipeline(lang)
+
+            for item_type, item_val in items:
+                if cancel_flag.is_set():
+                    break
+                if item_type == "silence":
+                    all_audio.append(np.zeros(item_val, dtype=np.float32))
+                else:
+                    try:
+                        parts = self._synthesise_chunk(pipeline, item_val, voice_id, speed)
+                        all_audio.extend(parts)
+                    except Exception as exc:
+                        logger.error("Error on line %d (%s): %s", i + 1, speaker, exc)
+
+            prev_speaker = speaker
+            progress_callback(i + 1, total)
+
+        if not all_audio:
+            raise RuntimeError("No audio was generated")
+
+        combined = np.concatenate(all_audio)
+        combined = post_process(combined, SAMPLE_RATE, post_proc_options)
+        self._save_audio(combined, output_path, output_format)
+        return output_path
+
+    # ------------------------------------------------------------------
     # Audio file saving
     # ------------------------------------------------------------------
 

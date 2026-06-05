@@ -13,6 +13,9 @@ let isPreviewing = false;
 let hasV3 = false;
 let lastOutputPath = null;
 let currentEngine = 'kokoro';
+let currentMode = 'voice';      // 'voice' | 'podcast'
+let parsedScript = null;        // result from api.parse_script()
+let speakerCardEls = {};        // { speakerName: { voiceEl, speedEl } }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DOM references
@@ -35,6 +38,7 @@ function appInit() {
   initVoiceBlending();
   initPostProcessing();
   initEngineTabs();
+  initModeSwitcher();
   loadVoiceData();
   loadDefaultOutputDir();
 }
@@ -605,6 +609,8 @@ async function handlePreview() {
 // Generate / Cancel
 // ─────────────────────────────────────────────────────────────────────────────
 async function handleGenerateOrCancel() {
+  if (currentMode === 'podcast') { handleGeneratePodcast(); return; }
+
   if (isGenerating) {
     await window.pywebview.api.cancel();
     setStatus('Cancelling…', 'running');
@@ -673,8 +679,10 @@ function applyProgress(p) {
   $('progress-fill').style.width = pct + '%';
 
   if (p.total_chunks > 0) {
-    $('progress-label').textContent =
-      `Generating chunk ${p.current_chunk} of ${p.total_chunks}…`;
+    const label = currentMode === 'podcast'
+      ? `Line ${p.current_chunk} of ${p.total_chunks}…`
+      : `Generating chunk ${p.current_chunk} of ${p.total_chunks}…`;
+    $('progress-label').textContent = label;
   } else {
     $('progress-label').textContent = pct < 100 ? 'Generating…' : 'Finishing…';
   }
@@ -733,7 +741,223 @@ function showProgress(visible) {
 
 function setGeneratingUI(on) {
   const btn = $('btn-generate');
-  btn.textContent = on ? '✕ Cancel' : '⬡ Generate';
+  const label = currentMode === 'podcast' ? '⬡ Generate Podcast' : '⬡ Generate';
+  btn.textContent = on ? '✕ Cancel' : label;
   btn.classList.toggle('cancelling', on);
   $('btn-preview').disabled = on;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mode switcher (Single Voice ↔ Podcast)
+// ─────────────────────────────────────────────────────────────────────────────
+function initModeSwitcher() {
+  $$('.mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => switchMode(btn.dataset.mode));
+  });
+  $('btn-parse-script').addEventListener('click', handleParseScript);
+  $('between-speakers-ms').addEventListener('input', e => {
+    $('between-speakers-value').textContent = e.target.value + ' ms';
+  });
+}
+
+function switchMode(mode) {
+  currentMode = mode;
+  const isPodcast = mode === 'podcast';
+
+  $$('.mode-btn').forEach(btn =>
+    btn.classList.toggle('active', btn.dataset.mode === mode)
+  );
+
+  $('podcast-panel').classList.toggle('hidden', !isPodcast);
+  $('single-voice-sections').classList.toggle('hidden', isPodcast);
+  $('speed-row').classList.toggle('hidden', isPodcast);
+  $('split-row').classList.toggle('hidden', isPodcast);
+  $('btn-preview').classList.toggle('hidden', isPodcast);
+
+  // Update generate button label
+  const btn = $('btn-generate');
+  if (!isGenerating) btn.textContent = isPodcast ? '⬡ Generate Podcast' : '⬡ Generate';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Script parsing
+// ─────────────────────────────────────────────────────────────────────────────
+async function handleParseScript() {
+  const text = $('text-input').value.trim();
+  if (!text) { setStatus('Paste or load a script first', 'error'); return; }
+
+  $('btn-parse-script').disabled = true;
+  setStatus('Parsing script…', 'running');
+
+  try {
+    const result = await window.pywebview.api.parse_script(text);
+    if (!result.success) {
+      setStatus('Parse error: ' + result.error, 'error');
+      return;
+    }
+    parsedScript = result;
+    const statsBar = $('podcast-stats-bar');
+    statsBar.textContent =
+      `${result.speakers.length} speakers · ${result.line_count} lines`;
+    statsBar.classList.remove('hidden');
+    renderSpeakerCards(result.speakers, result.speaker_line_counts);
+    $('podcast-timing-section').style.display = '';
+    setStatus(
+      `Parsed: ${result.speakers.length} speakers, ${result.line_count} lines`,
+      'success'
+    );
+  } catch (err) {
+    setStatus('Parse failed: ' + err, 'error');
+  } finally {
+    $('btn-parse-script').disabled = false;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Speaker cards
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Cycle through these for default voice assignments
+const _DEFAULT_VOICES = [
+  'af_heart', 'am_echo', 'bf_emma', 'bm_george',
+  'af_bella', 'am_michael', 'af_river', 'am_fenrir',
+];
+
+function getAllVoicesFlat() {
+  if (!voiceData) return [];
+  const out = [];
+  for (const [lang, langData] of Object.entries(voiceData)) {
+    for (const accentData of Object.values(langData.accents)) {
+      for (const id of [...(accentData.female || []), ...(accentData.male || [])]) {
+        if (!unavailableVoices.has(id))
+          out.push({ id, lang, langCode: langData.lang_code });
+      }
+    }
+  }
+  return out;
+}
+
+function renderSpeakerCards(speakers, lineCounts) {
+  const container = $('speaker-cards');
+  container.innerHTML = '';
+  speakerCardEls = {};
+
+  const allVoices = getAllVoicesFlat();
+
+  speakers.forEach((speaker, idx) => {
+    const defaultVoice = _DEFAULT_VOICES[idx % _DEFAULT_VOICES.length];
+    const count = lineCounts?.[speaker] ?? 0;
+    const card = buildSpeakerCard(speaker, defaultVoice, count, allVoices);
+    container.appendChild(card);
+  });
+}
+
+function buildSpeakerCard(speaker, defaultVoice, lineCount, allVoices) {
+  const card = document.createElement('div');
+  card.className = 'speaker-card';
+
+  // Group voices by language for the <optgroup> approach
+  const byLang = {};
+  for (const v of allVoices) {
+    if (!byLang[v.lang]) byLang[v.lang] = [];
+    byLang[v.lang].push(v);
+  }
+
+  const optionsHtml = Object.entries(byLang).map(([lang, voices]) => {
+    const opts = voices.map(v =>
+      `<option value="${v.id}" data-lang="${v.langCode}"${v.id === defaultVoice ? ' selected' : ''}>${v.id}</option>`
+    ).join('');
+    return `<optgroup label="${lang}">${opts}</optgroup>`;
+  }).join('');
+
+  card.innerHTML = `
+    <div class="speaker-card-header">
+      <span class="speaker-name">${speaker}</span>
+      <span class="speaker-line-count">${lineCount} line${lineCount !== 1 ? 's' : ''}</span>
+    </div>
+    <div class="form-row">
+      <label>Voice</label>
+      <select class="select spk-voice">${optionsHtml}</select>
+    </div>
+    <div class="form-row">
+      <label>Speed</label>
+      <div class="slider-with-value">
+        <input type="range" class="slider spk-speed" min="0.5" max="2.0" step="0.05" value="1.0">
+        <span class="slider-value spk-speed-val">1.00×</span>
+      </div>
+    </div>
+  `;
+
+  const speedEl = card.querySelector('.spk-speed');
+  const speedVal = card.querySelector('.spk-speed-val');
+  speedEl.addEventListener('input', () => {
+    speedVal.textContent = parseFloat(speedEl.value).toFixed(2) + '×';
+  });
+
+  speakerCardEls[speaker] = {
+    voiceEl: card.querySelector('.spk-voice'),
+    speedEl,
+  };
+
+  return card;
+}
+
+function collectSpeakerVoices() {
+  const result = {};
+  for (const [speaker, els] of Object.entries(speakerCardEls)) {
+    const voiceId = els.voiceEl.value;
+    const selected = els.voiceEl.selectedOptions[0];
+    const langCode = selected?.dataset.lang || 'a';
+    result[speaker] = {
+      voice_id: voiceId,
+      lang_code: langCode,
+      speed: parseFloat(els.speedEl.value),
+    };
+  }
+  return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Podcast generation
+// ─────────────────────────────────────────────────────────────────────────────
+async function handleGeneratePodcast() {
+  if (isGenerating) {
+    await window.pywebview.api.cancel();
+    setStatus('Cancelling…', 'running');
+    return;
+  }
+
+  const text = $('text-input').value.trim();
+  if (!text) { setStatus('No script text', 'error'); return; }
+  if (!parsedScript) { setStatus('Click "Parse Script" first', 'error'); return; }
+  if (Object.keys(speakerCardEls).length === 0) {
+    setStatus('No speakers assigned', 'error'); return;
+  }
+
+  const params = {
+    text,
+    speaker_voices:      collectSpeakerVoices(),
+    output_format:       $('output-format').value,
+    output_filename:     $('output-filename').value.trim(),
+    output_dir:          $('output-dir').value.trim(),
+    post_processing:     getPostProcessingOptions(),
+    between_speakers_ms: parseInt($('between-speakers-ms').value),
+  };
+
+  try {
+    const resp = await window.pywebview.api.generate_podcast(params);
+    if (!resp.started) {
+      setStatus('Could not start: ' + (resp.error || ''), 'error');
+      return;
+    }
+  } catch (err) {
+    setStatus('Failed to start: ' + err, 'error');
+    return;
+  }
+
+  isGenerating = true;
+  setGeneratingUI(true);
+  setStatus('Generating podcast…', 'running');
+  showProgress(true);
+  startProgressPolling();
 }

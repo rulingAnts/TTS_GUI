@@ -14,6 +14,10 @@
         <span class="logo-icon">◉</span>
         <span class="logo-text">Kokoro TTS Studio</span>
       </div>
+      <div class="mode-switcher">
+        <button class="mode-btn active" data-mode="voice">Single Voice</button>
+        <button class="mode-btn"        data-mode="podcast">Podcast</button>
+      </div>
     </header>
 
     <main class="main-content">
@@ -51,6 +55,40 @@
         </div>
 
         <div class="col-scroll">
+
+          <!-- ══ PODCAST PANEL (hidden in single-voice mode) ══════════ -->
+          <div id="podcast-panel" class="hidden">
+
+            <div class="section-group">
+              <h3 class="group-label">Script</h3>
+              <p class="podcast-hint">
+                Format each line as <code>Speaker: dialogue text</code><br>
+                Stage directions in (parentheses) or [brackets] are skipped.
+              </p>
+              <button id="btn-parse-script" class="btn btn-secondary" style="margin-top:8px;width:100%">
+                ⟳ Parse Script
+              </button>
+              <div id="podcast-stats-bar" class="podcast-stats-bar hidden"></div>
+            </div>
+
+            <div id="speaker-cards" class="speaker-cards"></div>
+
+            <div class="section-group" id="podcast-timing-section" style="display:none">
+              <h3 class="group-label">Timing</h3>
+              <div class="form-row">
+                <label for="between-speakers-ms">Speaker gap</label>
+                <div class="slider-with-value">
+                  <input type="range" id="between-speakers-ms" class="slider"
+                         min="0" max="2000" step="50" value="500">
+                  <span id="between-speakers-value" class="slider-value">500 ms</span>
+                </div>
+              </div>
+            </div>
+
+          </div><!-- /podcast-panel -->
+
+          <!-- ══ SINGLE-VOICE SECTIONS (hidden in podcast mode) ═══════ -->
+          <div id="single-voice-sections">
 
           <!-- Primary Voice ------------------------------------------- -->
           <div class="section-group">
@@ -204,11 +242,13 @@
             </div><!-- /blend-panel -->
           </div>
 
-          <!-- Generation Parameters ----------------------------------- -->
+          </div><!-- /single-voice-sections -->
+
+          <!-- Generation Parameters (always visible) ------------------ -->
           <div class="section-group">
             <h3 class="group-label">Generation</h3>
 
-            <div class="form-row">
+            <div class="form-row" id="speed-row">
               <label for="speed-slider">Speed</label>
               <div class="slider-with-value">
                 <input type="range" id="speed-slider" class="slider" min="0.5" max="2.0" step="0.05" value="1.0">
@@ -225,7 +265,7 @@
               </select>
             </div>
 
-            <div class="form-row">
+            <div class="form-row" id="split-row">
               <label for="split-pattern">Split on</label>
               <select id="split-pattern" class="select">
                 <option value="\\n\\n+" selected>Paragraph breaks</option>
