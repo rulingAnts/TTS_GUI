@@ -181,11 +181,23 @@ def blend_voices(voice_specs: List[dict]):
 # TTS Engine
 # ---------------------------------------------------------------------------
 
+def _best_device() -> str:
+    """Return the fastest available PyTorch device on this machine."""
+    import torch
+    if torch.backends.mps.is_available():
+        return "mps"        # Apple Silicon GPU
+    if torch.cuda.is_available():
+        return "cuda"       # Nvidia GPU
+    return "cpu"
+
+
 class TTSEngine:
     def __init__(self):
         self._pipelines: dict = {}
         self._voice_cache: dict = {}   # voice_id → loaded tensor (or str fallback)
         self._lock = threading.Lock()
+        self._device = _best_device()
+        logger.info("TTS device: %s", self._device)
 
     def _get_pipeline(self, lang_code: str):
         if lang_code not in self._pipelines:
@@ -193,29 +205,43 @@ class TTSEngine:
                 if lang_code not in self._pipelines:
                     from kokoro import KPipeline
 
-                    logger.info("Loading Kokoro pipeline for lang_code=%s", lang_code)
-                    self._pipelines[lang_code] = KPipeline(lang_code=lang_code)
+                    logger.info(
+                        "Loading Kokoro pipeline lang_code=%s device=%s",
+                        lang_code, self._device,
+                    )
+                    try:
+                        # Kokoro ≥ 0.9.4 accepts a device kwarg
+                        self._pipelines[lang_code] = KPipeline(
+                            lang_code=lang_code, device=self._device
+                        )
+                    except TypeError:
+                        # Older versions don't — fall back silently
+                        logger.warning("KPipeline doesn't accept device=; running on CPU")
+                        self._pipelines[lang_code] = KPipeline(lang_code=lang_code)
         return self._pipelines[lang_code]
 
     def _resolve_voice(self, voice_id: str):
         """
-        Return a pre-loaded voice tensor for voice_id (cached after first load).
-        Loading locally avoids any HuggingFace network request at generation time.
-        Falls back to the bare string if no local .pt file is found, which will
-        cause Kokoro to try HF — acceptable only when online.
+        Return a pre-loaded voice tensor for voice_id (cached after first load),
+        moved to the active device so it's ready for the pipeline.
+        Falls back to the bare string if no local .pt file is found.
         """
         if voice_id not in self._voice_cache:
             path = _find_voice_tensor_path(voice_id)
             if path is not None:
                 try:
                     import torch
-                    self._voice_cache[voice_id] = torch.load(path, weights_only=True)
-                    logger.info("Loaded voice tensor: %s", path)
+                    tensor = torch.load(path, weights_only=True)
+                    self._voice_cache[voice_id] = tensor.to(self._device)
+                    logger.info("Loaded voice tensor %s → %s", voice_id, self._device)
                 except Exception as exc:
-                    logger.warning("Could not load tensor for %s (%s); falling back to string", voice_id, exc)
+                    logger.warning(
+                        "Could not load tensor for %s (%s); falling back to string",
+                        voice_id, exc,
+                    )
                     self._voice_cache[voice_id] = voice_id
             else:
-                logger.warning("No local tensor found for %s — will attempt HF download", voice_id)
+                logger.warning("No local tensor for %s — will attempt HF download", voice_id)
                 self._voice_cache[voice_id] = voice_id
         return self._voice_cache[voice_id]
 
@@ -227,11 +253,15 @@ class TTSEngine:
         return blend_voices(voice_specs)
 
     def _synthesise_chunk(self, pipeline, chunk: str, voice, speed: float) -> List[np.ndarray]:
-        """Run one text chunk through the pipeline, return list of audio arrays."""
+        """Run one text chunk through the pipeline, return list of CPU float32 arrays."""
         parts = []
         for _gs, _ps, audio in pipeline(chunk, voice=voice, speed=speed):
-            if audio is not None and len(audio) > 0:
-                parts.append(np.array(audio, dtype=np.float32))
+            if audio is None or len(audio) == 0:
+                continue
+            # Pipeline may return a torch tensor (possibly on MPS/CUDA) or a numpy array
+            if hasattr(audio, "cpu"):
+                audio = audio.cpu().numpy()
+            parts.append(np.asarray(audio, dtype=np.float32))
         return parts
 
     # ------------------------------------------------------------------
