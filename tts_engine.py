@@ -134,28 +134,30 @@ def _find_voice_tensor_path(voice_id: str) -> Optional[Path]:
     return None
 
 
-def blend_voices(voice_specs: List[dict]):
+def blend_voices(voice_specs: List[dict]) -> str:
     """
     Blend voice tensors by weighted average.
-    voice_specs: [{"voice_id": "af_heart", "weight": 60}, ...]
-    Returns a torch.Tensor (blended) or a str (single voice ID on fallback).
+    Saves the result to a temp .pt file and returns its path.
+
+    Kokoro's load_single_voice() accepts either a voice ID string (looked up
+    via HF hub) or a file path (loaded directly).  By saving the blended
+    tensor to a temp file we stay fully offline and avoid the tensor-vs-string
+    type mismatch in load_voice().
     """
     import torch
-
-    if len(voice_specs) == 1:
-        return voice_specs[0]["voice_id"]
+    import tempfile
 
     total_weight = sum(v["weight"] for v in voice_specs)
     if total_weight <= 0:
-        return voice_specs[0]["voice_id"]
+        return _resolve_voice_path(voice_specs[0]["voice_id"])
 
-    tensors = []
-    weights = []
+    tensors: List = []
+    weights: List[float] = []
 
     for spec in voice_specs:
         path = _find_voice_tensor_path(spec["voice_id"])
         if path is None:
-            logger.warning("Cannot find tensor for %s — skipping in blend", spec["voice_id"])
+            logger.warning("Cannot find tensor for %s — skipping from blend", spec["voice_id"])
             continue
         try:
             t = torch.load(path, weights_only=True)
@@ -165,16 +167,28 @@ def blend_voices(voice_specs: List[dict]):
             logger.error("Error loading tensor for %s: %s", spec["voice_id"], exc)
 
     if not tensors:
-        logger.warning("No tensors loaded; falling back to first voice")
-        return voice_specs[0]["voice_id"]
+        logger.warning("No tensors loaded for blending; using first voice")
+        return _resolve_voice_path(voice_specs[0]["voice_id"])
 
     if len(tensors) == 1:
-        return tensors[0]
+        # Only one loaded — return its original path directly
+        path = _find_voice_tensor_path(voice_specs[0]["voice_id"])
+        return str(path) if path else voice_specs[0]["voice_id"]
 
     w_total = sum(weights)
     weights = [w / w_total for w in weights]
     blended = sum(w * t for w, t in zip(weights, tensors))
-    return blended
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".pt", delete=False)
+    torch.save(blended, tmp.name)
+    logger.info("Blended voice saved to temp: %s", tmp.name)
+    return tmp.name
+
+
+def _resolve_voice_path(voice_id: str) -> str:
+    """Return local .pt path for voice_id, or bare ID as HF fallback."""
+    path = _find_voice_tensor_path(voice_id)
+    return str(path) if path else voice_id
 
 
 # ---------------------------------------------------------------------------
@@ -217,12 +231,16 @@ class TTSEngine:
 
     @staticmethod
     def _configure_threads() -> None:
-        """Use all available CPU cores for PyTorch intra-op parallelism."""
+        """
+        Set PyTorch CPU thread count to (cpu_count - 1), keeping one core
+        free for the UI and OS so the system stays responsive during inference.
+        """
         import os, torch
         try:
-            n = os.cpu_count() or 4
+            total = os.cpu_count() or 4
+            n = max(1, total - 1)   # leave one core for the UI
             torch.set_num_threads(n)
-            logger.info("PyTorch CPU threads: %d", n)
+            logger.info("PyTorch CPU threads: %d of %d", n, total)
         except Exception as exc:
             logger.debug("Could not set thread count: %s", exc)
 
@@ -247,32 +265,26 @@ class TTSEngine:
                         self._pipelines[lang_code] = KPipeline(lang_code=lang_code)
         return self._pipelines[lang_code]
 
-    def _resolve_voice(self, voice_id: str):
+    def _resolve_voice(self, voice_id: str) -> str:
         """
-        Return a pre-loaded voice tensor for voice_id (cached after first load),
-        moved to the active device so it's ready for the pipeline.
-        Falls back to the bare string if no local .pt file is found.
+        Return the local .pt file path for voice_id (cached after first lookup).
+
+        Kokoro's load_single_voice() checks os.path.exists() before attempting
+        an HF download, so passing a full path keeps everything offline.
+        Falls back to the bare voice ID string if no local file is found
+        (Kokoro will then try HF — acceptable when HF_HUB_OFFLINE is not set).
         """
         if voice_id not in self._voice_cache:
             path = _find_voice_tensor_path(voice_id)
             if path is not None:
-                try:
-                    import torch
-                    tensor = torch.load(path, weights_only=True)
-                    self._voice_cache[voice_id] = tensor.to(self._device)
-                    logger.info("Loaded voice tensor %s → %s", voice_id, self._device)
-                except Exception as exc:
-                    logger.warning(
-                        "Could not load tensor for %s (%s); falling back to string",
-                        voice_id, exc,
-                    )
-                    self._voice_cache[voice_id] = voice_id
+                self._voice_cache[voice_id] = str(path)
+                logger.info("Found voice %s → %s", voice_id, path)
             else:
-                logger.warning("No local tensor for %s — will attempt HF download", voice_id)
+                logger.warning("No local file for %s — Kokoro will attempt HF", voice_id)
                 self._voice_cache[voice_id] = voice_id
         return self._voice_cache[voice_id]
 
-    def _prepare_voice(self, voice_specs: List[dict]):
+    def _prepare_voice(self, voice_specs: List[dict]) -> str:
         if not voice_specs:
             return self._resolve_voice("af_heart")
         if len(voice_specs) == 1:
