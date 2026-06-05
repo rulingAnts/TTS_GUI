@@ -353,6 +353,9 @@ function initControls() {
 
   // Voice 1 cascade
   wireVoiceCascade(VOICE_SLOTS[0]);
+
+  // Single-voice test button
+  $('btn-test-v1').addEventListener('click', () => testVoice($('v1-voice').value));
 }
 
 function wireVoiceCascade(slot) {
@@ -739,12 +742,40 @@ function showProgress(visible) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Voice test (plays hardcoded sample sentence)
+// ─────────────────────────────────────────────────────────────────────────────
+async function testVoice(voiceId) {
+  if (!voiceId) { setStatus('Select a voice first', 'error'); return; }
+  if (isGenerating || isPreviewing) { setStatus('Busy — wait for current task to finish', 'error'); return; }
+
+  isPreviewing = true;
+  setAllTestButtons(true);
+  setStatus(`Testing ${voiceId}…`, 'running');
+
+  try {
+    const result = await window.pywebview.api.test_voice(voiceId);
+    setStatus(result.success ? 'Ready' : ('Test error: ' + result.error),
+              result.success ? 'idle' : 'error');
+  } catch (err) {
+    setStatus('Test failed: ' + err, 'error');
+  } finally {
+    isPreviewing = false;
+    setAllTestButtons(false);
+  }
+}
+
+function setAllTestButtons(disabled) {
+  $$('.btn-test-voice').forEach(btn => { btn.disabled = disabled; });
+}
+
 function setGeneratingUI(on) {
   const btn = $('btn-generate');
   const label = currentMode === 'podcast' ? '⬡ Generate Podcast' : '⬡ Generate';
   btn.textContent = on ? '✕ Cancel' : label;
   btn.classList.toggle('cancelling', on);
   $('btn-preview').disabled = on;
+  setAllTestButtons(on);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -878,6 +909,8 @@ function buildSpeakerCard(speaker, defaultVoice, lineCount, allVoices) {
     <div class="form-row">
       <label>Voice</label>
       <select class="select spk-voice">${optionsHtml}</select>
+      <button class="btn btn-ghost btn-small btn-test-voice spk-test-btn"
+              title="Play sample sentence in this voice">▶</button>
     </div>
     <div class="form-row">
       <label>Speed</label>
@@ -892,6 +925,10 @@ function buildSpeakerCard(speaker, defaultVoice, lineCount, allVoices) {
   const speedVal = card.querySelector('.spk-speed-val');
   speedEl.addEventListener('input', () => {
     speedVal.textContent = parseFloat(speedEl.value).toFixed(2) + '×';
+  });
+
+  card.querySelector('.spk-test-btn').addEventListener('click', () => {
+    testVoice(card.querySelector('.spk-voice').value);
   });
 
   speakerCardEls[speaker] = {

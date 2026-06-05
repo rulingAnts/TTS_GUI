@@ -290,6 +290,24 @@ class Api:
     def get_default_output_dir(self) -> str:
         return str(get_outputs_path())
 
+    def test_voice(self, voice_id: str) -> dict:
+        """Play a short hardcoded sample sentence in the given voice."""
+        _SAMPLE = "Hello! This is the selected voice. How does it sound to you?"
+        try:
+            if self._running:
+                return {"success": False, "error": "Generation in progress — try again after it finishes"}
+            from script_parser import lang_code_for_voice
+            self._engine.preview_audio(
+                text=_SAMPLE,
+                voice_specs=[{"voice_id": voice_id, "weight": 100}],
+                lang_code=lang_code_for_voice(voice_id),
+                speed=1.0,
+            )
+            return {"success": True, "error": None}
+        except Exception as exc:
+            logger.error("test_voice %s: %s", voice_id, exc)
+            return {"success": False, "error": str(exc)}
+
     # ------------------------------------------------------------------
     # Podcast / multi-speaker
     # ------------------------------------------------------------------
