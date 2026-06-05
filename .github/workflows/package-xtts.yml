@@ -118,40 +118,22 @@ jobs:
           path: ${{ steps.zip.outputs.zip_name }}
           retention-days: 90
 
-      # Attach zip to the most recent existing release.
-      # If no release exists yet, create a pre-release as a fallback.
-      - name: Attach to existing release (or create pre-release)
+      - name: Publish pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          TAG="xtts-v2-${{ steps.zip.outputs.date }}"
           ZIP="${{ steps.zip.outputs.zip_name }}"
 
-          # Find the most recent release tag (including pre-releases)
-          LATEST_TAG=$(gh release list \
-            --repo "${{ github.repository }}" \
-            --limit 1 \
-            --json tagName \
-            -q '.[0].tagName' 2>/dev/null || echo "")
+          gh release create "$TAG" \
+            --title "XTTS v2 Model Weights — ${{ steps.zip.outputs.date }}" \
+            --prerelease \
+            --notes "Pre-packaged XTTS v2 model weights for Kokoro TTS Studio.
 
-          if [ -n "$LATEST_TAG" ]; then
-            echo "Adding $ZIP to existing release: $LATEST_TAG"
-            gh release upload "$LATEST_TAG" "$ZIP" \
-              --repo "${{ github.repository }}" \
-              --clobber
-            echo ""
-            echo "✅ Uploaded to existing release:"
-            echo "   ${{ github.server_url }}/${{ github.repository }}/releases/tag/$LATEST_TAG"
-          else
-            # No releases yet — create a pre-release
-            TAG="model-weights-${{ steps.zip.outputs.date }}"
-            echo "No existing release found — creating pre-release: $TAG"
-            gh release create "$TAG" \
-              --title "Model Weights — ${{ steps.zip.outputs.date }}" \
-              --prerelease \
-              --notes "Pre-packaged model weights for Kokoro TTS Studio (XTTS v2)." \
-              --repo "${{ github.repository }}" \
-              "$ZIP"
-            echo ""
-            echo "✅ Pre-release created:"
-            echo "   ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
-          fi
+          Install: \`python setup_offline.py --xtts /path/to/$ZIP\`
+
+          Source: coqui/XTTS-v2 (Coqui Public Model License 1.0)" \
+            --repo "${{ github.repository }}" \
+            "$ZIP"
+
+          echo "✅ Pre-release: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
