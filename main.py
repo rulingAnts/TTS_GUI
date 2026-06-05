@@ -43,6 +43,40 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(messag
 logger = logging.getLogger(__name__)
 
 
+def _play_wav(path: str) -> None:
+    """
+    Play a WAV file using the best available method for the current platform.
+
+    macOS  : afplay  (built-in, works from any thread)
+    Windows: winsound (built-in Python module)
+    Linux  : aplay → paplay → ffplay in order; falls back to sounddevice
+    Any    : sounddevice as last resort
+    """
+    if sys.platform == "darwin":
+        subprocess.run(["afplay", path], check=True)
+        return
+
+    if sys.platform == "win32":
+        import winsound
+        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)
+        return
+
+    # Linux / other — try common CLI players
+    for cmd in [["aplay", path], ["paplay", path], ["ffplay", "-nodisp", "-autoexit", path]]:
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            return
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+
+    # Universal fallback
+    import soundfile as sf
+    import sounddevice as sd
+    data, sr = sf.read(path, dtype="float32")
+    sd.play(data, sr)
+    sd.wait()
+
+
 def _check_espeak() -> bool:
     try:
         r = subprocess.run(
@@ -222,11 +256,7 @@ class Api:
 
     def _play_file(self, path: str) -> dict:
         try:
-            import soundfile as sf
-            import sounddevice as sd
-            data, sr = sf.read(path, dtype="float32")
-            sd.play(data, sr)
-            sd.wait()
+            _play_wav(path)
             return {"success": True, "error": None}
         except Exception as exc:
             logger.error("_play_file: %s", exc)
@@ -335,13 +365,7 @@ class Api:
                 tmp_path = f.name
             sf.write(tmp_path, combined, 24000)
 
-            if sys.platform == "darwin":
-                subprocess.run(["afplay", tmp_path], check=True)
-            elif sys.platform == "win32":
-                import winsound
-                winsound.PlaySound(tmp_path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)
-            else:
-                subprocess.run(["aplay", tmp_path], check=True)
+            _play_wav(tmp_path)
 
             return {"success": True, "error": None}
 

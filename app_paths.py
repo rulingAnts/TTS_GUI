@@ -140,6 +140,30 @@ def _augment_path() -> None:
         os.environ["PATH"] = os.pathsep.join(verified + current)
 
 
+def _set_offline_mode() -> None:
+    """
+    If the model is already cached locally, tell HuggingFace hub to never
+    make network requests.  This prevents the hub from doing freshness
+    HEAD-checks against huggingface.co on every pipeline call, which
+    causes long retry delays when HF is unreachable.
+
+    If the model is NOT yet cached (normal first-run for most users), we
+    leave HF_HUB_OFFLINE unset so the first-run download screen can reach
+    HuggingFace to fetch the weights.
+
+    An explicit HF_HUB_OFFLINE value already in the environment is always
+    respected — this function never overrides a user-set value.
+    """
+    if "HF_HUB_OFFLINE" in os.environ:
+        return  # Respect whatever the user/system set
+
+    if model_is_ready():
+        # Model is local — safe to go offline
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    # else: model not yet downloaded — leave online so the download screen works
+
+
 def setup_espeak_env() -> None:
     """
     Configure espeak-ng so kokoro / misaki / phonemizer find the correct
@@ -149,6 +173,8 @@ def setup_espeak_env() -> None:
       pre-built espeak-ng binaries as a pip package.
     • In a PyInstaller bundle: points env vars at _MEIPASS/espeak-ng-data.
     """
+    # Prevent HF hub from making network freshness-checks for cached files
+    _set_offline_mode()
     # Fix PATH first so espeak-ng is findable regardless of launch method
     _augment_path()
 
