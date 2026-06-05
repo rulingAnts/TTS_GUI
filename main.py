@@ -291,22 +291,69 @@ class Api:
         return str(get_outputs_path())
 
     def test_voice(self, voice_id: str) -> dict:
-        """Play a short hardcoded sample sentence in the given voice."""
+        """
+        Play a short hardcoded sample sentence in the given voice.
+        Generates to a temp WAV file and plays it via the OS system player
+        (afplay on macOS, winsound on Windows) — more reliable than
+        sounddevice in a pywebview GUI context.
+        """
         _SAMPLE = "Hello! This is the selected voice. How does it sound to you?"
+        tmp_path = None
         try:
             if self._running:
                 return {"success": False, "error": "Generation in progress — try again after it finishes"}
+
+            import numpy as np
+            import soundfile as sf
+            import tempfile
+
             from script_parser import lang_code_for_voice
-            self._engine.preview_audio(
-                text=_SAMPLE,
-                voice_specs=[{"voice_id": voice_id, "weight": 100}],
-                lang_code=lang_code_for_voice(voice_id),
-                speed=1.0,
-            )
+            lang_code = lang_code_for_voice(voice_id)
+            voice     = self._engine._resolve_voice(voice_id)
+            pipeline  = self._engine._get_pipeline(lang_code)
+
+            # Generate audio directly (avoids pause-parsing overhead)
+            all_audio = []
+            for _gs, _ps, audio in pipeline(_SAMPLE, voice=voice, speed=1.0):
+                if audio is None or len(audio) == 0:
+                    continue
+                if hasattr(audio, "cpu"):
+                    audio = audio.cpu().numpy()
+                all_audio.append(np.asarray(audio, dtype=np.float32))
+
+            if not all_audio:
+                return {"success": False, "error": "Pipeline produced no audio — check terminal for errors"}
+
+            combined = np.concatenate(all_audio)
+
+            # Sanity check: flag silent output (e.g. MPS NaN-collapsed to zero)
+            if not np.any(combined != 0):
+                return {"success": False, "error": "Audio is silent — possible MPS compatibility issue; try restarting"}
+
+            # Write temp WAV and play via OS player (bypasses PortAudio/sounddevice)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                tmp_path = f.name
+            sf.write(tmp_path, combined, 24000)
+
+            if sys.platform == "darwin":
+                subprocess.run(["afplay", tmp_path], check=True)
+            elif sys.platform == "win32":
+                import winsound
+                winsound.PlaySound(tmp_path, winsound.SND_FILENAME | winsound.SND_NODEFAULT)
+            else:
+                subprocess.run(["aplay", tmp_path], check=True)
+
             return {"success": True, "error": None}
+
         except Exception as exc:
-            logger.error("test_voice %s: %s", voice_id, exc)
+            logger.error("test_voice %s: %s", voice_id, exc, exc_info=True)
             return {"success": False, "error": str(exc)}
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
     # ------------------------------------------------------------------
     # Podcast / multi-speaker
