@@ -184,6 +184,7 @@ def blend_voices(voice_specs: List[dict]):
 class TTSEngine:
     def __init__(self):
         self._pipelines: dict = {}
+        self._voice_cache: dict = {}   # voice_id → loaded tensor (or str fallback)
         self._lock = threading.Lock()
 
     def _get_pipeline(self, lang_code: str):
@@ -196,11 +197,33 @@ class TTSEngine:
                     self._pipelines[lang_code] = KPipeline(lang_code=lang_code)
         return self._pipelines[lang_code]
 
+    def _resolve_voice(self, voice_id: str):
+        """
+        Return a pre-loaded voice tensor for voice_id (cached after first load).
+        Loading locally avoids any HuggingFace network request at generation time.
+        Falls back to the bare string if no local .pt file is found, which will
+        cause Kokoro to try HF — acceptable only when online.
+        """
+        if voice_id not in self._voice_cache:
+            path = _find_voice_tensor_path(voice_id)
+            if path is not None:
+                try:
+                    import torch
+                    self._voice_cache[voice_id] = torch.load(path, weights_only=True)
+                    logger.info("Loaded voice tensor: %s", path)
+                except Exception as exc:
+                    logger.warning("Could not load tensor for %s (%s); falling back to string", voice_id, exc)
+                    self._voice_cache[voice_id] = voice_id
+            else:
+                logger.warning("No local tensor found for %s — will attempt HF download", voice_id)
+                self._voice_cache[voice_id] = voice_id
+        return self._voice_cache[voice_id]
+
     def _prepare_voice(self, voice_specs: List[dict]):
         if not voice_specs:
-            return "af_heart"
+            return self._resolve_voice("af_heart")
         if len(voice_specs) == 1:
-            return voice_specs[0]["voice_id"]
+            return self._resolve_voice(voice_specs[0]["voice_id"])
         return blend_voices(voice_specs)
 
     def _synthesise_chunk(self, pipeline, chunk: str, voice, speed: float) -> List[np.ndarray]:
@@ -365,6 +388,7 @@ class TTSEngine:
             voice_id = cfg.get("voice_id", "af_heart")
             lang     = cfg.get("lang_code", "a")
             speed    = float(cfg.get("speed", 1.0))
+            voice    = self._resolve_voice(voice_id)   # load tensor locally
 
             # Gap between turns
             if prev_speaker is not None:
@@ -385,7 +409,7 @@ class TTSEngine:
                     all_audio.append(np.zeros(item_val, dtype=np.float32))
                 else:
                     try:
-                        parts = self._synthesise_chunk(pipeline, item_val, voice_id, speed)
+                        parts = self._synthesise_chunk(pipeline, item_val, voice, speed)
                         all_audio.extend(parts)
                     except Exception as exc:
                         logger.error("Error on line %d (%s): %s", i + 1, speaker, exc)

@@ -247,8 +247,10 @@ class Api:
 
     def browse_file(self) -> str:
         try:
+            dialog = getattr(webview, "FileDialog", None)
+            mode = dialog.OPEN if dialog else webview.OPEN_DIALOG  # type: ignore[attr-defined]
             result = self.window.create_file_dialog(
-                webview.OPEN_DIALOG,
+                mode,
                 allow_multiple=False,
                 file_types=("Text Files (*.txt)", "All Files (*.*)"),
             )
@@ -259,7 +261,9 @@ class Api:
 
     def browse_folder(self) -> str:
         try:
-            result = self.window.create_file_dialog(webview.FOLDER_DIALOG)
+            dialog = getattr(webview, "FileDialog", None)
+            mode = dialog.FOLDER if dialog else webview.FOLDER_DIALOG  # type: ignore[attr-defined]
+            result = self.window.create_file_dialog(mode)
             return result[0] if result else ""
         except Exception as exc:
             logger.error("browse_folder: %s", exc)
