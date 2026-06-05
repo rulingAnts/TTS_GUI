@@ -21,11 +21,13 @@ jobs:
 
       # XTTS v2 doesn't need espeak-ng to download, only to run.
       # Install TTS and its deps (torch CPU-only — we only need the download).
-      - name: Install Coqui TTS package (CPU-only torch)
+      - name: Install Coqui TTS package (CPU-only torch + torchaudio)
         run: |
           pip install --upgrade pip
-          # CPU-only torch first to avoid the multi-GB CUDA build
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # Install torch AND torchaudio from the CPU-only index together.
+          # If torchaudio is left to PyPI it pulls in CUDA libs that aren't
+          # present on the runner, causing an OSError at import time.
+          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
           pip install "TTS>=0.22.0"
         timeout-minutes: 20
 
