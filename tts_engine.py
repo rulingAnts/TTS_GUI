@@ -213,6 +213,18 @@ class TTSEngine:
         self._lock = threading.Lock()
         self._device = _best_device()
         logger.info("TTS device: %s", self._device)
+        self._configure_threads()
+
+    @staticmethod
+    def _configure_threads() -> None:
+        """Use all available CPU cores for PyTorch intra-op parallelism."""
+        import os, torch
+        try:
+            n = os.cpu_count() or 4
+            torch.set_num_threads(n)
+            logger.info("PyTorch CPU threads: %d", n)
+        except Exception as exc:
+            logger.debug("Could not set thread count: %s", exc)
 
     def _get_pipeline(self, lang_code: str):
         if lang_code not in self._pipelines:
