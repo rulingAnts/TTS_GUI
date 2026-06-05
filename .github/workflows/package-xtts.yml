@@ -21,43 +21,41 @@ jobs:
 
       # XTTS v2 doesn't need espeak-ng to download, only to run.
       # Install TTS and its deps (torch CPU-only — we only need the download).
-      - name: Install Coqui TTS package (CPU-only torch + torchaudio)
-        run: |
-          pip install --upgrade pip
-          # Install torch AND torchaudio from the CPU-only index together.
-          # If torchaudio is left to PyPI it pulls in CUDA libs that aren't
-          # present on the runner, causing an OSError at import time.
-          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-          pip install "TTS>=0.22.0"
-        timeout-minutes: 20
+      # We only need huggingface_hub to download the model files —
+      # no torch, no torchaudio, no CUDA headaches.
+      - name: Install huggingface_hub
+        run: pip install --upgrade pip huggingface_hub
+        timeout-minutes: 5
 
-      # Download the model by initialising the TTS class.
-      # TTS_HOME controls where the files land.
-      - name: Download XTTS v2 model
+      # Download directly from coqui/XTTS-v2 on HuggingFace.
+      # The destination directory uses TTS's naming convention so the app
+      # finds the files when TTS_HOME is set to the parent.
+      - name: Download XTTS v2 model files from HuggingFace
         run: |
-          mkdir -p xtts-bundle
           python - <<'PYEOF'
-          import os, sys
-          os.environ["TTS_HOME"] = os.path.abspath("xtts-bundle")
-          print(f"TTS_HOME = {os.environ['TTS_HOME']}")
-
-          from TTS.api import TTS
-          print("Initialising XTTS v2 — this downloads ~1.8 GB…")
-          tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2",
-                    gpu=False, progress_bar=True)
-          speakers = tts.speakers or []
-          print(f"✓ XTTS v2 ready — {len(speakers)} built-in speakers")
-
-          # Sanity-check the files are actually there
+          from huggingface_hub import snapshot_download
           import pathlib
-          model_dir = pathlib.Path("xtts-bundle") / \
-              "tts_models--multilingual--multi-dataset--xtts_v2"
+
+          REPO_ID  = "coqui/XTTS-v2"
+          DEST_DIR = "xtts-bundle/tts_models--multilingual--multi-dataset--xtts_v2"
+
+          print(f"Downloading {REPO_ID} → {DEST_DIR} …")
+          snapshot_download(
+              repo_id=REPO_ID,
+              local_dir=DEST_DIR,
+              ignore_patterns=["*.md", ".gitattributes"],
+          )
+
+          # Sanity-check key files
+          dest = pathlib.Path(DEST_DIR)
           for fname in ["model.pth", "config.json", "vocab.json",
                         "speakers_xtts.pth"]:
-              p = model_dir / fname
+              p = dest / fname
               size_mb = p.stat().st_size / 1_048_576 if p.exists() else 0
-              status = f"{size_mb:.1f} MB" if p.exists() else "MISSING"
+              status  = f"{size_mb:.0f} MB" if p.exists() else "MISSING ✗"
               print(f"  {fname}: {status}")
+
+          print("✓ Download complete")
           PYEOF
         timeout-minutes: 30
 
