@@ -127,7 +127,7 @@ jobs:
 
           gh release create "$TAG" \
             --title "XTTS v2 Model Weights — ${{ steps.zip.outputs.date }}" \
-            --prerelease \
+            --draft \
             --notes "Pre-packaged XTTS v2 model weights for Kokoro TTS Studio.
 
           Install: \`python setup_offline.py --xtts /path/to/$ZIP\`
