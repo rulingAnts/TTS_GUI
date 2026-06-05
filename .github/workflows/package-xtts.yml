@@ -1,0 +1,156 @@
+name: Package XTTS v2 Model
+
+# Run manually from the Actions tab.
+on:
+  workflow_dispatch:
+
+jobs:
+  download-and-release:
+    name: Download XTTS v2 and publish Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # XTTS v2 doesn't need espeak-ng to download, only to run.
+      # Install TTS and its deps (torch CPU-only — we only need the download).
+      - name: Install Coqui TTS package (CPU-only torch)
+        run: |
+          pip install --upgrade pip
+          # CPU-only torch first to avoid the multi-GB CUDA build
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install "TTS>=0.22.0"
+        timeout-minutes: 20
+
+      # Download the model by initialising the TTS class.
+      # TTS_HOME controls where the files land.
+      - name: Download XTTS v2 model
+        run: |
+          mkdir -p xtts-bundle
+          python - <<'PYEOF'
+          import os, sys
+          os.environ["TTS_HOME"] = os.path.abspath("xtts-bundle")
+          print(f"TTS_HOME = {os.environ['TTS_HOME']}")
+
+          from TTS.api import TTS
+          print("Initialising XTTS v2 — this downloads ~1.8 GB…")
+          tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2",
+                    gpu=False, progress_bar=True)
+          speakers = tts.speakers or []
+          print(f"✓ XTTS v2 ready — {len(speakers)} built-in speakers")
+
+          # Sanity-check the files are actually there
+          import pathlib
+          model_dir = pathlib.Path("xtts-bundle") / \
+              "tts_models--multilingual--multi-dataset--xtts_v2"
+          for fname in ["model.pth", "config.json", "vocab.json",
+                        "speakers_xtts.pth"]:
+              p = model_dir / fname
+              size_mb = p.stat().st_size / 1_048_576 if p.exists() else 0
+              status = f"{size_mb:.1f} MB" if p.exists() else "MISSING"
+              print(f"  {fname}: {status}")
+          PYEOF
+        timeout-minutes: 30
+
+      # Write a README into the bundle so the user knows what to do.
+      - name: Write README
+        run: |
+          cat > xtts-bundle/README.txt <<'EOF'
+          Kokoro TTS Studio — XTTS v2 offline model bundle
+          ==================================================
+
+          Contents
+          --------
+          tts_models--multilingual--multi-dataset--xtts_v2/
+            model.pth           Main XTTS v2 model weights (~1.6 GB)
+            config.json         Model configuration
+            vocab.json          Vocabulary file
+            speakers_xtts.pth   Built-in speaker embeddings
+            (other files)
+
+          How to install
+          --------------
+          Run setup_offline.py with the --xtts flag:
+
+              python setup_offline.py --xtts /path/to/this.zip
+
+          Or drop the zip in ~/Downloads and run:
+
+              python setup_offline.py --xtts
+
+          The script extracts the model to:
+            macOS:   ~/Library/Application Support/KokoroTTSStudio/models/xtts/
+            Windows: %APPDATA%\KokoroTTSStudio\models\xtts\
+
+          After extraction, launch the app and click the XTTS v2 engine tab.
+          Click "Load XTTS v2" (no download needed — uses the local files).
+
+          License
+          -------
+          XTTS v2: Coqui Public Model License 1.0
+          https://coqui.ai/cpml
+          EOF
+
+      # Zip the bundle.
+      - name: Create zip archive
+        id: zip
+        run: |
+          DATE=$(date -u +%Y%m%d)
+          ZIP_NAME="xtts-v2-model-${DATE}.zip"
+          zip -r "$ZIP_NAME" xtts-bundle/
+          SIZE=$(du -sh "$ZIP_NAME" | cut -f1)
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "date=$DATE"         >> "$GITHUB_OUTPUT"
+          echo "Created $ZIP_NAME ($SIZE)"
+
+      # Upload as a workflow artifact (90-day backup).
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xtts-v2-model-${{ steps.zip.outputs.date }}
+          path: ${{ steps.zip.outputs.zip_name }}
+          retention-days: 90
+
+      # Publish a GitHub Release with a direct download link.
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="xtts-v2-${{ steps.zip.outputs.date }}"
+          ZIP="${{ steps.zip.outputs.zip_name }}"
+
+          gh release create "$TAG" \
+            --title "XTTS v2 Model Weights — ${{ steps.zip.outputs.date }}" \
+            --notes "$(cat <<NOTES
+          ## XTTS v2 — pre-packaged model weights
+
+          Offline bundle for **Kokoro TTS Studio** (XTTS v2 engine).
+          Source: Coqui XTTS v2 (Coqui Public Model License 1.0)
+
+          ### Install
+          \`\`\`bash
+          python setup_offline.py --xtts /path/to/$ZIP
+          \`\`\`
+          Or drop the zip in \`~/Downloads\` and run \`python setup_offline.py --xtts\`.
+
+          ### After install
+          Launch the app → click **XTTS v2** engine tab → **Load XTTS v2**.
+          No internet required.
+
+          ---
+          *Generated by the [Package XTTS v2 Model](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) workflow.*
+          NOTES
+          )" \
+            --repo "${{ github.repository }}" \
+            "$ZIP"
+
+          echo ""
+          echo "✅ Release published:"
+          echo "   ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
