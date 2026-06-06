@@ -352,7 +352,7 @@ class TTSEngine:
                     parts = self._synthesise_chunk(pipeline, item_val, voice, speed)
                     all_audio.extend(parts)
                 except Exception as exc:
-                    logger.error("Error on chunk %d: %s", chunk_idx + 1, exc)
+                    logger.error("Error on chunk %d: %s", chunk_idx + 1, exc, exc_info=True)
                     failed_chunk = chunk_idx + 1
                 finally:
                     chunk_idx += 1

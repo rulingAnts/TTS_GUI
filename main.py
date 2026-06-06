@@ -207,6 +207,7 @@ class Api:
             self._progress = 1.0
 
     def preview(self, params: dict) -> dict:
+        logger.info("preview() called, engine=%s", params.get("engine", "kokoro"))
         try:
             play_file = params.get("play_file", "")
             if play_file:
@@ -218,26 +219,49 @@ class Api:
             engine = params.get("engine", "kokoro")
             speed  = float(params.get("speed", 1.0))
 
-            if engine == "piper":
-                self._piper_engine.preview_audio(
-                    text=text,
-                    voice_id=params.get("piper_voice", "id_ID-argis-medium"),
-                    speed=speed,
-                )
-            elif engine == "xtts":
-                self._xtts_engine.preview_audio(
-                    text=text,
-                    language=params.get("xtts_language", "en"),
-                    speaker_wav=params.get("xtts_speaker_wav") or None,
-                    speaker=params.get("xtts_speaker") or None,
-                )
-            else:
-                self._engine.preview_audio(
-                    text=text,
-                    voice_specs=params.get("voices", [{"voice_id": "af_heart", "weight": 100}]),
-                    lang_code=params.get("lang_code", "a"),
-                    speed=speed,
-                )
+            # Run synthesis in a fresh Python thread — pywebview dispatches API
+            # calls via a GCD/platform thread on macOS that can deadlock PyTorch's
+            # CPU thread pool when XTTS and Kokoro are both loaded in the same
+            # process.  A regular threading.Thread always works.
+            result: dict = {}
+            done = threading.Event()
+
+            def _run() -> None:
+                try:
+                    if engine == "piper":
+                        self._piper_engine.preview_audio(
+                            text=text,
+                            voice_id=params.get("piper_voice", "id_ID-argis-medium"),
+                            speed=speed,
+                        )
+                    elif engine == "xtts":
+                        self._xtts_engine.preview_audio(
+                            text=text,
+                            language=params.get("xtts_language", "en"),
+                            speaker_wav=params.get("xtts_speaker_wav") or None,
+                            speaker=params.get("xtts_speaker") or None,
+                        )
+                    else:
+                        self._engine.preview_audio(
+                            text=text,
+                            voice_specs=params.get("voices", [{"voice_id": "af_heart", "weight": 100}]),
+                            lang_code=params.get("lang_code", "a"),
+                            speed=speed,
+                        )
+                    result["ok"] = True
+                except Exception as exc:
+                    result["error"] = str(exc)
+                    logger.error("preview (_run): %s", exc)
+                finally:
+                    done.set()
+
+            threading.Thread(target=_run, daemon=True).start()
+            done.wait(timeout=120)  # 2-minute safety timeout
+
+            if not done.is_set():
+                return {"success": False, "error": "Preview timed out"}
+            if "error" in result:
+                return {"success": False, "error": result["error"]}
             return {"success": True, "error": None}
         except Exception as exc:
             logger.error("preview: %s", exc)
@@ -315,58 +339,75 @@ class Api:
         Generates to a temp WAV file and plays it via the OS system player
         (afplay on macOS, winsound on Windows) — more reliable than
         sounddevice in a pywebview GUI context.
+
+        Runs synthesis in a dedicated Python thread to avoid GCD/platform-thread
+        deadlocks with PyTorch's CPU thread pool when multiple engines are loaded.
         """
         _SAMPLE = "Hello! This is the selected voice. How does it sound to you?"
-        tmp_path = None
-        try:
-            if self._running:
-                return {"success": False, "error": "Generation in progress — try again after it finishes"}
+        if self._running:
+            return {"success": False, "error": "Generation in progress — try again after it finishes"}
 
-            import numpy as np
-            import soundfile as sf
-            import tempfile
+        result: dict = {}
+        done = threading.Event()
 
-            from script_parser import lang_code_for_voice
-            lang_code = lang_code_for_voice(voice_id)
-            voice     = self._engine._resolve_voice(voice_id)
-            pipeline  = self._engine._get_pipeline(lang_code)
+        def _run() -> None:
+            tmp_path = None
+            try:
+                import numpy as np
+                import soundfile as sf
+                import tempfile
 
-            # Generate audio directly (avoids pause-parsing overhead)
-            all_audio = []
-            for _gs, _ps, audio in pipeline(_SAMPLE, voice=voice, speed=1.0):
-                if audio is None or len(audio) == 0:
-                    continue
-                if hasattr(audio, "cpu"):
-                    audio = audio.cpu().numpy()
-                all_audio.append(np.asarray(audio, dtype=np.float32))
+                from script_parser import lang_code_for_voice
+                lang_code = lang_code_for_voice(voice_id)
+                voice     = self._engine._resolve_voice(voice_id)
+                pipeline  = self._engine._get_pipeline(lang_code)
 
-            if not all_audio:
-                return {"success": False, "error": "Pipeline produced no audio — check terminal for errors"}
+                # Generate audio directly (avoids pause-parsing overhead)
+                all_audio = []
+                for _gs, _ps, audio in pipeline(_SAMPLE, voice=voice, speed=1.0):
+                    if audio is None or len(audio) == 0:
+                        continue
+                    if hasattr(audio, "cpu"):
+                        audio = audio.cpu().numpy()
+                    all_audio.append(np.asarray(audio, dtype=np.float32))
 
-            combined = np.concatenate(all_audio)
+                if not all_audio:
+                    result["error"] = "Pipeline produced no audio — check terminal for errors"
+                    return
 
-            # Sanity check: flag silent output (e.g. MPS NaN-collapsed to zero)
-            if not np.any(combined != 0):
-                return {"success": False, "error": "Audio is silent — possible MPS compatibility issue; try restarting"}
+                combined = np.concatenate(all_audio)
 
-            # Write temp WAV and play via OS player (bypasses PortAudio/sounddevice)
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                tmp_path = f.name
-            sf.write(tmp_path, combined, 24000)
+                # Sanity check: flag silent output (e.g. MPS NaN-collapsed to zero)
+                if not np.any(combined != 0):
+                    result["error"] = "Audio is silent — possible MPS compatibility issue; try restarting"
+                    return
 
-            _play_wav(tmp_path)
+                # Write temp WAV and play via OS player (bypasses PortAudio/sounddevice)
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                    tmp_path = f.name
+                sf.write(tmp_path, combined, 24000)
+                _play_wav(tmp_path)
+                result["ok"] = True
 
-            return {"success": True, "error": None}
+            except Exception as exc:
+                logger.error("test_voice %s: %s", voice_id, exc, exc_info=True)
+                result["error"] = str(exc)
+            finally:
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+                done.set()
 
-        except Exception as exc:
-            logger.error("test_voice %s: %s", voice_id, exc, exc_info=True)
-            return {"success": False, "error": str(exc)}
-        finally:
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+        threading.Thread(target=_run, daemon=True).start()
+        done.wait(timeout=120)
+
+        if not done.is_set():
+            return {"success": False, "error": "Voice test timed out"}
+        if "error" in result:
+            return {"success": False, "error": result["error"]}
+        return {"success": True, "error": None}
 
     # ------------------------------------------------------------------
     # Podcast / multi-speaker
@@ -578,7 +619,7 @@ class Api:
             result = self.window.create_file_dialog(
                 mode,
                 allow_multiple=False,
-                file_types=("Audio Files (*.wav *.mp3 *.flac)", "All Files (*.*)"),
+                file_types=("Audio Files (*.wav;*.mp3;*.flac)", "All Files (*.*)"),
             )
             return result[0] if result else ""
         except Exception as exc:

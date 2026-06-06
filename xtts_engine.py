@@ -44,6 +44,9 @@ LANGUAGES: dict[str, str] = {
 # Helpers
 # ---------------------------------------------------------------------------
 
+_MODEL_SUBDIR = "tts_models--multilingual--multi-dataset--xtts_v2"
+
+
 def _set_tts_home() -> Path:
     """Point TTS_HOME at our app-data directory so models stay in one place."""
     try:
@@ -56,11 +59,80 @@ def _set_tts_home() -> Path:
     return home
 
 
+def _find_model_dir() -> Optional[Path]:
+    """
+    Return the directory that contains model.pth + config.json, or None.
+
+    We check several candidate locations because:
+    - setup_offline.py places the model at  <xtts_home>/<MODEL_SUBDIR>/
+    - The TTS model manager may place it at  <xtts_home>/tts/<MODEL_SUBDIR>/
+    - Older TTS versions may have dropped files directly into <xtts_home>/tts/
+    """
+    home = _set_tts_home()
+    candidates = [
+        home / _MODEL_SUBDIR,                   # setup_offline.py location
+        home / "tts" / _MODEL_SUBDIR,           # TTS model-manager location
+        home / "tts",                            # flat drop (some TTS versions)
+    ]
+    for candidate in candidates:
+        if (candidate / "model.pth").exists() and (candidate / "config.json").exists():
+            return candidate
+    return None
+
+
 def is_model_ready() -> bool:
     """Return True if the XTTS v2 model files are present locally."""
-    home = _set_tts_home()
-    model_dir = home / "tts_models--multilingual--multi-dataset--xtts_v2"
-    return (model_dir / "model.pth").exists()
+    return _find_model_dir() is not None
+
+
+def _patch_torchaudio_load() -> None:
+    """
+    torchaudio 2.9+ removed set_audio_backend() and now requires torchcodec
+    for torchaudio.load() on macOS.  We don't want to pull in torchcodec, so
+    we patch torchaudio.load with a soundfile-based implementation.
+
+    soundfile handles WAV/FLAC/OGG natively; for MP3 it falls back to
+    pydub/ffmpeg if available, otherwise raises a clear error.
+
+    This is only called once (idempotent guard on _TORCHAUDIO_PATCHED).
+    """
+    import torchaudio  # noqa: PLC0415
+
+    # Already patched in a previous call
+    if getattr(torchaudio, "_ktts_soundfile_patched", False):
+        return
+
+    import torch
+    import soundfile as sf
+
+    def _sf_load(
+        filepath,
+        frame_offset: int = 0,
+        num_frames: int = -1,
+        normalize: bool = True,
+        channels_first: bool = True,
+        format=None,
+        backend=None,
+        encoding=None,
+    ):
+        path_str = str(filepath)
+        sf_kwargs: dict = {"start": frame_offset, "dtype": "float32", "always_2d": True}
+        if num_frames >= 0:
+            sf_kwargs["frames"] = num_frames
+        try:
+            data, sample_rate = sf.read(path_str, **sf_kwargs)
+        except Exception as exc:
+            raise RuntimeError(
+                f"torchaudio.load (soundfile fallback) could not read {path_str}: {exc}"
+            ) from exc
+
+        # soundfile → (frames, channels); torch expects (channels, frames)
+        tensor = torch.from_numpy(data.T if channels_first else data)
+        return tensor, sample_rate
+
+    torchaudio.load = _sf_load
+    torchaudio._ktts_soundfile_patched = True
+    logger.info("torchaudio.load patched with soundfile backend")
 
 
 # ---------------------------------------------------------------------------
@@ -73,21 +145,81 @@ class XTTSEngine:
         self._lock  = threading.Lock()
         self._loading = False
         self._load_error: str = ""
+        self._speakers_cache: List[str] = []   # populated during load
 
     # ── Lazy loader ────────────────────────────────────────────────────────
 
     def ensure_loaded(self) -> None:
-        """Load (and if necessary download) the XTTS v2 model."""
+        """Load the XTTS v2 model from local files (no network access)."""
         if self._tts is not None:
             return
         with self._lock:
             if self._tts is not None:
                 return
-            from TTS.api import TTS
+
+            # Suppress the interactive CLI license prompt — XTTS v2 is
+            # available under the Coqui Public Model License (CPML) for
+            # non-commercial use.  The user agrees by choosing to use it.
+            os.environ["COQUI_TOS_AGREED"] = "1"
             _set_tts_home()
-            logger.info("Loading XTTS v2 model (this downloads ~1.8 GB on first run)…")
-            self._tts = TTS(MODEL_ID, gpu=False, progress_bar=False)
-            n = len(self._tts.speakers or [])
+
+            model_dir = _find_model_dir()
+            if model_dir is None:
+                home = _set_tts_home()
+                raise FileNotFoundError(
+                    f"XTTS v2 model not found under {home}\n"
+                    "Install it with:\n"
+                    "  python setup_offline.py --xtts <xtts-v2-model-*.zip>"
+                )
+
+            from TTS.api import TTS
+
+            # PyTorch ≥ 2.6 changed torch.load to default weights_only=True,
+            # which blocks XTTS v2's checkpoints (they use custom pickle
+            # classes like XttsConfig).  We know these files are from the
+            # official Coqui release, so temporarily allow full unpickling.
+            import torch as _torch
+            _orig_load = _torch.load
+            def _load_unsafe(*args, **kw):
+                kw.setdefault("weights_only", False)
+                return _orig_load(*args, **kw)
+            _torch.load = _load_unsafe
+
+            logger.info("Loading XTTS v2 from local files: %s", model_dir)
+            try:
+                # model_path must be the directory; TTS appends /model.pth itself.
+                self._tts = TTS(
+                    model_path=str(model_dir),
+                    config_path=str(model_dir / "config.json"),
+                    gpu=False,
+                    progress_bar=False,
+                )
+            finally:
+                _torch.load = _orig_load  # always restore
+
+            # torchaudio 2.9+ removed the old audio-backend API and now needs
+            # torchcodec for torchaudio.load().  Replace it with our soundfile
+            # shim so XTTS voice-sample cloning works without torchcodec.
+            _patch_torchaudio_load()
+
+            # .speakers on TTS(nn.Module) is unreliable when loaded via
+            # model_path — any internal AttributeError gets swallowed by
+            # Module.__getattr__ and surfaces as a missing-attribute error.
+            # Go straight to the speaker_manager to build our own list.
+            try:
+                sm = self._tts.synthesizer.tts_model.speaker_manager
+                if sm is not None:
+                    # name_to_id may be a dict or a dict_keys object;
+                    # iterating either yields the speaker names directly.
+                    if hasattr(sm, "name_to_id"):
+                        self._speakers_cache = sorted(sm.name_to_id)
+                    elif hasattr(sm, "speaker_names"):
+                        self._speakers_cache = sorted(sm.speaker_names)
+            except Exception as e:
+                logger.warning("Could not load speaker list: %s", e)
+                self._speakers_cache = []
+
+            n = len(self._speakers_cache)
             logger.info("XTTS v2 ready — %d built-in speakers", n)
 
     def start_load_async(self) -> None:
@@ -119,9 +251,7 @@ class XTTSEngine:
 
     @property
     def speakers(self) -> List[str]:
-        if self._tts is None:
-            return []
-        return sorted(self._tts.speakers or [])
+        return self._speakers_cache
 
     # ── Core synthesis ─────────────────────────────────────────────────────
 
@@ -148,8 +278,8 @@ class XTTSEngine:
             kwargs["speaker_wav"] = str(wav_path)
         elif speaker:
             kwargs["speaker"] = speaker
-        elif self._tts.speakers:
-            kwargs["speaker"] = self._tts.speakers[0]
+        elif self._speakers_cache:
+            kwargs["speaker"] = self._speakers_cache[0]
 
         wav = self._tts.tts(**kwargs)
         return np.asarray(wav, dtype=np.float32)

@@ -8,11 +8,15 @@ Supported format:
 
 Rules:
     - "Speaker Name: dialogue"   starts a new speaker turn
+    - Speaker names MUST be Title Case — every word starts with a capital letter
+      or digit (e.g. "Seth", "Dr Smith", "Voice 1", "Man In Black").
+      This prevents normal prose like "Aikhenvald gives a comparison: ..."
+      from being misread as a speaker line.
     - Continuation lines         (no speaker prefix) append to the current speaker
     - Lines matching (...)  or [stage directions] alone on a line are skipped
     - Empty lines are ignored
     - (...) pause markers inside dialogue are preserved for the TTS engine
-    - Speaker names: start with a letter, up to 40 chars, letters/digits/spaces/hyphens
+    - Speaker names: up to 5 Title Case words, letters/digits/spaces/hyphens/underscores
 """
 
 import re
@@ -20,7 +24,17 @@ from dataclasses import dataclass, field
 from typing import List
 
 # "Speaker Name: dialogue" — speaker name captured in group 1, rest in group 2
-_SPEAKER_RE = re.compile(r'^([A-Za-z][A-Za-z0-9 _\-]{0,39}):\s*(.*)')
+#
+# Title Case rule: the name must be one or more words where every word starts
+# with an uppercase letter or digit.  This prevents normal prose sentences
+# (e.g. "Aikhenvald gives a striking comparison: ...") from being parsed as
+# speaker lines, because words like "gives", "a", "striking" start lowercase.
+#
+# Allowed names:  Seth   Dr Smith   Man 1   Voice Over   AI Assistant
+# Rejected names: aikhenvald gives a comparison   the answer is: yes
+_SPEAKER_RE = re.compile(
+    r'^([A-Z][a-zA-Z0-9]*(?:[ _\-][A-Z0-9][a-zA-Z0-9]*){0,4}):\s*(.*)'
+)
 
 # Full-line stage directions: whole line is (text) or [text]
 _DIRECTION_RE = re.compile(r'^\s*[\(\[].+[\)\]]\s*$')

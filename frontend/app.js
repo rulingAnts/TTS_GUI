@@ -237,40 +237,44 @@ async function checkXttsStatus() {
 }
 
 function applyXttsStatusUI(s) {
-  const txt = $('xtts-status-text');
-  const btn = $('btn-load-xtts');
+  const txt      = $('xtts-status-text');
+  const btn      = $('btn-load-xtts');
   const controls = $('xtts-controls');
+  const licNote  = $('xtts-license-note');
+
+  const showBtn = (show) => btn.classList.toggle('hidden', !show);
+  const showLic = (show) => licNote && licNote.classList.toggle('hidden', !show);
 
   if (s.ready) {
     txt.textContent = '✓ XTTS v2 ready';
     txt.className = 'piper-status-ready';
-    btn.classList.add('hidden');
+    showBtn(false); showLic(false);
     controls.classList.remove('hidden');
     populateXttsLanguages(s.languages);
     populateXttsSpeakers(s.speakers);
   } else if (s.loading) {
     txt.textContent = '⏳ Loading model…';
     txt.className = 'piper-status-checking';
-    btn.classList.add('hidden');
+    showBtn(false); showLic(false);
     controls.classList.add('hidden');
     setTimeout(checkXttsStatus, 2000);
   } else if (s.error) {
-    txt.textContent = '✗ Error: ' + s.error;
+    txt.textContent = '✗ ' + s.error;
     txt.className = 'piper-status-missing';
     btn.textContent = '↺ Retry';
-    btn.classList.remove('hidden');
+    showBtn(true); showLic(true);
     controls.classList.add('hidden');
   } else if (s.model_on_disk) {
-    txt.textContent = 'Model on disk — click to load';
+    txt.textContent = 'Model ready — click to load';
     txt.className = 'piper-status-missing';
     btn.textContent = '▶ Load XTTS v2';
-    btn.classList.remove('hidden');
+    showBtn(true); showLic(true);
     controls.classList.add('hidden');
   } else {
-    txt.textContent = '⚠ Not downloaded (~1.8 GB)';
+    txt.textContent = '⚠ Model not installed';
     txt.className = 'piper-status-missing';
-    btn.textContent = '⬇ Download & Load';
-    btn.classList.remove('hidden');
+    btn.textContent = '? Setup instructions';
+    showBtn(true); showLic(false);
     controls.classList.add('hidden');
   }
 }
@@ -307,8 +311,19 @@ function populateXttsSpeakers(speakers) {
 }
 
 async function handleLoadXtts() {
+  // If the button says "Setup instructions", model isn't installed — show help.
+  if ($('btn-load-xtts').textContent.includes('Setup')) {
+    alert(
+      'XTTS v2 model not installed.\n\n' +
+      'Download the offline bundle from the GitHub releases page,\n' +
+      'then run:\n\n' +
+      '  python setup_offline.py --xtts ~/Downloads/xtts-v2-model-*.zip\n\n' +
+      'After that, restart the app and click "Load XTTS v2".'
+    );
+    return;
+  }
   $('btn-load-xtts').disabled = true;
-  setStatus('Loading XTTS v2 (this may take a while on first run)…', 'running');
+  setStatus('Loading XTTS v2 — please wait…', 'running');
   try {
     await window.pywebview.api.start_xtts_load();
     setTimeout(checkXttsStatus, 1000);
@@ -321,19 +336,35 @@ async function handleLoadXtts() {
 function initXttsControls() {
   $('btn-load-xtts').addEventListener('click', handleLoadXtts);
 
+  // Shared helper: switch XTTS voice mode programmatically and update the UI
+  function setXttsVoiceMode(mode) {
+    xttsVoiceMode = mode;
+    const radio = document.querySelector(`input[name="xtts-voice-mode"][value="${mode}"]`);
+    if (radio) radio.checked = true;
+    $('xtts-builtin-panel').classList.toggle('hidden', mode !== 'builtin');
+    $('xtts-sample-panel').classList.toggle('hidden',  mode !== 'sample');
+  }
+
   // Voice mode radio toggle
   $$('input[name="xtts-voice-mode"]').forEach(r => {
-    r.addEventListener('change', e => {
-      xttsVoiceMode = e.target.value;
-      $('xtts-builtin-panel').classList.toggle('hidden', xttsVoiceMode !== 'builtin');
-      $('xtts-sample-panel').classList.toggle('hidden',  xttsVoiceMode !== 'sample');
-    });
+    r.addEventListener('change', e => setXttsVoiceMode(e.target.value));
   });
 
-  // Browse voice sample
+  // Browse voice sample — auto-switch to sample mode when a file is chosen
   $('btn-browse-voice-sample').addEventListener('click', async () => {
     const path = await window.pywebview.api.browse_voice_sample();
-    if (path) { xttsSamplePath = path; $('xtts-sample-path').value = path; }
+    if (path) {
+      xttsSamplePath = path;
+      $('xtts-sample-path').value = path;
+      setXttsVoiceMode('sample');
+    }
+  });
+
+  // Keep xttsSamplePath in sync when user edits the path text box directly,
+  // and auto-switch modes based on whether the field is empty or not.
+  $('xtts-sample-path').addEventListener('input', e => {
+    xttsSamplePath = e.target.value.trim();
+    if (xttsSamplePath) setXttsVoiceMode('sample');
   });
 
   // Test buttons
@@ -362,11 +393,16 @@ async function testXttsVoice(language, speakerWav, speaker) {
 }
 
 function getXttsParams() {
+  // Safety: if the sample path text box has content, treat it as sample mode
+  // regardless of the radio state (handles edge cases / page reloads).
+  const pathInBox = ($('xtts-sample-path').value || '').trim();
+  const effectiveMode = pathInBox ? 'sample' : xttsVoiceMode;
+  const effectivePath = pathInBox || xttsSamplePath;
   return {
     engine:           'xtts',
     xtts_language:    $('xtts-language').value,
-    xtts_speaker:     xttsVoiceMode === 'builtin' ? $('xtts-speaker').value : '',
-    xtts_speaker_wav: xttsVoiceMode === 'sample'  ? xttsSamplePath : '',
+    xtts_speaker:     effectiveMode === 'builtin' ? $('xtts-speaker').value : '',
+    xtts_speaker_wav: effectiveMode === 'sample'  ? effectivePath : '',
   };
 }
 
@@ -740,6 +776,12 @@ async function handlePreview() {
     const piperVoice = $('piper-voice-select').value;
     if (!piperVoice) { setStatus('Select a Piper voice first', 'error'); return; }
     previewParams = { engine: 'piper', text, piper_voice: piperVoice, speed };
+  } else if (currentEngine === 'xtts') {
+    const xp = getXttsParams();
+    if (!xp.xtts_speaker && !xp.xtts_speaker_wav) {
+      setStatus('Select a speaker or choose a voice sample', 'error'); return;
+    }
+    previewParams = { ...xp, text, speed };
   } else {
     const specs = getVoiceSpecs();
     if (!specs.length) { setStatus('Select a voice first', 'error'); return; }
@@ -779,6 +821,11 @@ async function handleGenerateOrCancel() {
 
   if (currentEngine === 'piper') {
     if (!$('piper-voice-select').value) { setStatus('Select a Piper voice first', 'error'); return; }
+  } else if (currentEngine === 'xtts') {
+    const xp = getXttsParams();
+    if (!xp.xtts_speaker && !xp.xtts_speaker_wav) {
+      setStatus('Select a speaker or choose a voice sample', 'error'); return;
+    }
   } else {
     const specs = getVoiceSpecs();
     if (!specs.length) { setStatus('Select a voice first', 'error'); return; }
