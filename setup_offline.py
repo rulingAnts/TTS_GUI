@@ -44,12 +44,20 @@ def copy_tree(src: Path, dst: Path) -> None:
         shutil.copytree(src, dst)
 
 
-def extract_zip(zip_path: Path, tmp: Path) -> Path:
+def extract_zip(zip_path: Path, tmp: Path) -> None:
     tmp.mkdir(exist_ok=True)
     print(f"Extracting {zip_path.name} …")
     with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(tmp)
-    return tmp
+        # If the zip contains only one entry that is itself a zip, unwrap it
+        names = zf.namelist()
+        if len(names) == 1 and names[0].endswith(".zip"):
+            import io
+            print(f"  (double-zipped — unwrapping inner {names[0]}) …")
+            inner_data = zf.read(names[0])
+            with zipfile.ZipFile(io.BytesIO(inner_data)) as inner:
+                inner.extractall(tmp)
+        else:
+            zf.extractall(tmp)
 
 
 def resolve_source(arg: Path) -> Path:
@@ -58,9 +66,9 @@ def resolve_source(arg: Path) -> Path:
         return arg
     tmp = PROJECT_DIR / "_extract_tmp"
     extract_zip(arg, tmp)
-    # Some zips have a top-level folder; return the most likely root
+    # Walk common top-level folder names
     for candidate in [tmp / "xtts-bundle", tmp / "bundle", tmp]:
-        if candidate.exists():
+        if candidate.exists() and candidate.is_dir():
             return candidate
     return tmp
 
